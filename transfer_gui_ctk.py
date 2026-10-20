@@ -4,7 +4,29 @@ import io, os, sys, json, re, subprocess, threading, queue   # 20.10: +re — б
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import time
-import customtkinter as ctk
+try:
+    import customtkinter as ctk
+except ImportError as e:
+    # 20.10: машинный интерпретатор по умолчанию может быть не тот (на
+    # машине несколько Python) — под pythonw консоли нет и ImportError
+    # умирал молча. Диалог + лог.
+    _msg = ('customtkinter не установлен в этом Python:\n%s\n\n'
+            'Python: %s\n\n'
+            'Установка: pip install customtkinter==6.0.0' % (e, sys.executable))
+    try:
+        _r = tk.Tk()
+        _r.withdraw()
+        messagebox.showerror('Не хватает зависимости', _msg, parent=_r)
+    except Exception:
+        pass
+    try:
+        os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logs'), exist_ok=True)
+        with io.open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  'logs', 'gui_crash.log'), 'ab') as _f:
+            _f.write(_msg.encode('utf-8') + b'\n')
+    except Exception:
+        pass
+    sys.exit(1)
 
 import stage_cleanup as sc
 import stage_repair as sr
