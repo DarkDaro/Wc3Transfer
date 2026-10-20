@@ -12,6 +12,53 @@ import stage_repair as sr
 HERE = os.path.dirname(os.path.abspath(__file__))
 CFG = os.path.join(HERE, 'transfer_config.json')
 
+# 20.10: самодостаточность — свежий клон без конфига работает: GUI
+# создаёт каркас по умолчанию (пути карт пусты, добор пребылд-таблиц
+# нужно указать вручную — подсказка через планировку полей).
+DEFAULT_CFG = {
+    '_comment': 'Конфиг переноса объектов между lni-картами. Заполнить под пару карт, затем: python transfer_run.py --plan',
+    'source': '',
+    'target': '',
+    'name': '',
+    'tables': ['unit', 'ability', 'buff', 'item', 'upgrade'],
+    'skip_tables': ['w3i', 'misc'],
+    'import': {
+        'enabled': True,
+        'copy_dirs': ['resource', 'sound'],
+        'exclude_paths': ['war3mapskin.txt', 'war3mapExtra.txt', 'war3mapMap.blp',
+                          'war3mapMap.tga', 'war3mapMap.b00', 'minimap', 'LoadingScreen',
+                          'loadingscreen', 'loadbar', 'console', 'war3mapMisc.txt',
+                          'war3mapShadow', 'war3mapPreview', 'UI/Console', 'UI/'],
+        'check_missing_refs': True,
+        'allow_override': True,
+    },
+    'ui': {'enabled': False, 'mode': 'transfer'},
+    'code': {
+        'enabled': True, 'folders': 'flat', 'trigger_dirs': [],
+        'shift_coords': {'enabled': False, 'dx': 0.0, 'dy': 0.0, 'ufs_range': 4000.0},
+        'deploy_to': 'LIA', 'include_monolith': True, 'allow_b': True, 'only_dirs': [],
+        'header_mode': 'append', 'func_prefix': 'LIA', 'update_catalog': True,
+        'null_broken_gguits': True,
+    },
+    'geometry': {'enabled': False, 'offset': None, 'recount_z': True},
+    'testspawn': {'enabled': False, 'heroes': [], 'items': True, 'rect': 'center'},
+    'mapping': {
+        'pkl': 'transfer_mapping.pkl', 'registry': 'target_id_registry.json',
+        'case_conflict_check': True, 'duplicate_name_check': True, 'mode': 'smart',
+        # prebuilt_dir: ОБЯЗАТЕЛЬНО — prebuilt/Custom из w3x2lni своего патча
+        'prebuilt_dir': '',
+    },
+    'profile': 'custom',
+    'safety': {'backup_dir': 'transfer_backup', 'state_file': 'transfer_state.json',
+               'dry_run_first': True, 'stop_on_error': True},
+    'deps': {'roots': []},
+    'code_cut': {'enabled': False, 'entries': [], 'output': 'cut_heroes.j', 'auto_expand': True},
+    'stage_enabled': {'mapping': True, 'registry': True, 'deps': True, 'tables': True,
+                      'import': True, 'code': True, 'code_cut': True, 'geometry': False,
+                      'testspawn': False, 'verify': True, 'globals': True},
+    'gui': {'sound_on_done': True, 'autolog': True, 'log_font': 9, 'theme': 'dark'},
+}
+
 STAGES = ['mapping', 'registry', 'deps', 'tables', 'import', 'code', 'code_cut', 'globals', 'geometry', 'testspawn', 'verify']
 STAGE_LABELS = {
     'mapping': 'Маппинг ID',
@@ -145,12 +192,22 @@ class App(ctk.CTk):
         self.geometry('1200x1150')
         # 20.09: сохранённая геометрия из конфига не должна выдавливать
         # статусбар/кнопки за край — минимум 1180x1130
-        self.minsize(1180, 1130)
+        # 20.10 (аудит): 1264 — при системном DPI-масштабе 125% ряд 2
+        # кнопок и последние чипы прогресса не обрезаются
+        self.minsize(1264, 1130)
         self.cfg = {}
         self.stage_vars = {}
         self.q = queue.Queue()
         self.running = False
         self.log_size = 9
+        # 20.10 (аудит): рассинхрон окон — галочка защитного списка живёт
+        # в окне «Чистка триггеров», а скан окне «Чистка» читает её:
+        # дефолт до первого открытия окна (иначе AttributeError)
+        self._cleanup_v_prot = tk.BooleanVar(value=True)
+        # 20.10 (аудит): разовый перенос выбором (окно «Триггеры...»)
+        # сбрасывает only_dirs после прогона — обычный прогон не урезается
+        self._clear_only_dirs = False
+        self._proc = None
 
         self._build()
         self._load_cfg()
@@ -177,6 +234,27 @@ class App(ctk.CTk):
         inner.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         return f, inner
 
+    def _refresh_head_status(self):
+        # 20.10 (аудит): текст режима в шапке. После прогона «выполняется...»
+        # затирал баннер Обслуживания и не восстанавливался — теперь единая
+        # точка правды: и _apply_mode, и завершение прогона зовут её.
+        serv = self.mode_seg.get() == 'Обслуживание'
+        self.head_status.configure(
+            text='РЕЖИМ: ОБСЛУЖИВАНИЕ (только приёмник)' if serv else 'готов',
+            text_color=WARN if serv else None)
+
+    def _stop_run(self):
+        # 20.10 (аудит): остановка висящего прогона (терминейт ребёнка).
+        p = getattr(self, '_proc', None)
+        if p and p.poll() is None:
+            try:
+                p.terminate()
+                self._log('ОСТАНОВКА по кнопке «Стоп»', 'warn')
+            except Exception as e:
+                self._log('Стоп: не удалось прервать: %s' % e, 'err')
+        else:
+            self._log('Стоп: активного прогона нет', 'warn')
+
     def _apply_mode(self):
         """19.09 (v7): режим Перенос/Обслуживание.
         Обслуживание — только приёмник: донор-этапы и
@@ -193,9 +271,10 @@ class App(ctk.CTk):
             for cb in self._stage_cbs.get(s, []):
                 cb.configure(state='disabled' if serv else 'normal')
         # кнопки переноса
+        # 20.10 (аудит): + b_tspawn — TestSpawn в Обслуживании недоступен
         donor_btns = [self.b_plan, self.b_dry, self.b_run, self.b_loop,
                       self.b_status, self.b_rollback, self.b_reset,
-                      self.b_manifest, self.b_triggers]
+                      self.b_manifest, self.b_triggers, self.b_tspawn]
         for b in donor_btns:
             try:
                 b.configure(state='disabled' if serv else 'normal')
@@ -214,12 +293,7 @@ class App(ctk.CTk):
         self.cfg.setdefault('ui', {})['mode'] = 'service' if serv else 'transfer'
         self._save_cfg()
         # 19.09: индикатор режима в шапке
-        try:
-            self.head_status.configure(
-                text='РЕЖИМ: ОБСЛУЖИВАНИЕ (только приёмник)' if serv else '',
-                text_color=WARN if serv else None)
-        except Exception:
-            pass
+        self._refresh_head_status()
 
     def _build(self):
         # --- шапка (20.10: приглушённая подпись + акцентная полоса) ---
@@ -431,14 +505,19 @@ class App(ctk.CTk):
             command=lambda v: None)
         self.folders_seg.set("Одна папка")
         self.folders_seg.pack(fill="x", pady=(2, 4))
-        Tooltip(self.folders_seg,
-                "Одна папка — весь импорт в запись deploy_to (213-FW\\),\n"
-                "папка донора = префикс имени файла. Как раньше.\n"
-                "Папки как у донора — каждая папка триггеров донора получает\n"
-                "СВОЮ папку верхнего уровня trigger\\ (имя сохраняется 1:1):\n"
-                "в редакторе видно структуру, а не одна папка-свалка.\n"
-                "Корень донора, code-split и монолит всегда идут в deploy_to.\n"
-                "Смена режима чистит старое по манифесту деплоя.")
+        # 20.10 (аудит-фикс): CTk 6 — bind() на SegmentedButton бросает
+        # NotImplementedError; у остальных сегментов уже try/except
+        try:
+            Tooltip(self.folders_seg,
+                    "Одна папка — весь импорт в запись deploy_to (213-FW\\),\n"
+                    "папка донора = префикс имени файла. Как раньше.\n"
+                    "Папки как у донора — каждая папка триггеров донора получает\n"
+                    "СВОЮ папку верхнего уровня trigger\\ (имя сохраняется 1:1):\n"
+                    "в редакторе видно структуру, а не одна папка-свалка.\n"
+                    "Корень донора, code-split и монолит всегда идут в deploy_to.\n"
+                    "Смена режима чистит старое по манифесту деплоя.")
+        except Exception:
+            pass
         # 19.09 (v6): галочки каталога и монолита
         self.v_updcatalog = tk.BooleanVar(value=True)
         c10 = ctk.CTkCheckBox(gi2, text="Обновлять catalog.lml приёмника", variable=self.v_updcatalog,
@@ -569,6 +648,11 @@ class App(ctk.CTk):
         # виден; журнал (expand) получает то, что осталось.
         sb = ctk.CTkFrame(self, fg_color="transparent")
         sb.pack(fill="x", side="bottom", padx=10, pady=(0, 6))
+        # 20.10 (аудит): Стоп — теряет зависший этап (timeout есть только в CLI)
+        self.b_stop = ctk.CTkButton(sb, text='Стоп', width=66, height=26,
+                                    font=FONT_SMALL, state='disabled',
+                                    command=self._stop_run)
+        self.b_stop.pack(side='left', padx=(0, 4))
         self.status = ctk.CTkLabel(sb, text="готов", anchor="w",
                                    font=FONT_SMALL, height=24)
         self.status.pack(side="left", fill="x", expand=True)
@@ -699,7 +783,10 @@ class App(ctk.CTk):
 
     def _refresh_progress(self):
         try:
-            sp = os.path.join(HERE, 'transfer_state.json')
+            # 20.10 (аудит): state-файл читаем ИЗ КОНФИГА (safety.state_file)
+            # и рядом с конфигом — мультиконфиг и нестандартные имена
+            st_name = self.cfg.get('safety', {}).get('state_file', 'transfer_state.json')
+            sp = os.path.join(os.path.dirname(self._cfg_path()), st_name)
             done = set()
             if os.path.exists(sp):
                 st = json.load(io.open(sp, 'rb'))
@@ -747,16 +834,24 @@ class App(ctk.CTk):
         self.log_size = max(7, min(16, self.log_size + delta))
         self.log.configure(font=('Consolas', self.log_size))
 
+    def _log_path(self):
+        # 20.10 (аудит): журнал на конфиг — согласовано с transfer_run.log()
+        # (дефолтный конфиг -> transfer.log; остальные -> <имя конфига>.log)
+        stem = os.path.splitext(os.path.basename(self._cfg_path()))[0]
+        return os.path.join(os.path.dirname(self._cfg_path()), 'logs',
+                            'transfer.log' if stem == 'transfer_config' else stem + '.log')
+
     def _open_log(self):
-        p = os.path.join(HERE, 'logs', 'transfer.log')
+        p = self._log_path()
         if os.path.exists(p):
             os.startfile(p)
         else:
             messagebox.showinfo('Журнал', 'Журнала пока нет — запусти прогон.')
 
     def _open_manifest(self):
+        # 20.10 (аудит): манифесты ищем в папке КОНФИГА, не общего HERE
         import glob as _g
-        d = os.path.join(HERE, 'logs')
+        d = os.path.join(os.path.dirname(self._cfg_path()), 'logs')
         fs = sorted(_g.glob(os.path.join(d, 'transfer-manifest-*.md')))
         if fs:
             os.startfile(fs[-1])
@@ -786,10 +881,15 @@ class App(ctk.CTk):
             else:
                 msg, tag = item
                 scope = None
+            if msg == '__refresh__':
+                # 20.10 (аудит): чипы прогресса — после каждого этапа
+                self._refresh_progress()
+                continue
             if msg == '__done__':
                 self.running = False
+                self.b_stop.configure(state='disabled')
                 self.status.configure(text='готов')
-                self.head_status.configure(text='готов')
+                self._refresh_head_status()   # 20.10 (аудит): баннер режима восстанавливается
                 # 20.09: прогресс-бар — завершение
                 self.pbar.set(1)
                 self.pct_lbl.configure(text='100%')
@@ -838,6 +938,10 @@ class App(ctk.CTk):
 
     def _collect_cfg(self):
         cfg = self.cfg
+        # 20.10 (аудит): гарантированные секции — на свежем/старом конфиге
+        # без них _collect_cfg падал KeyError до старта любой кнопки
+        for k in ('geometry', 'testspawn', 'import', 'code', 'safety', 'gui'):
+            cfg.setdefault(k, {})
         cfg['source'] = self.e_src.get().strip()
         cfg['target'] = self.e_tgt.get().strip()
         cfg['name'] = self.e_name.get().strip()
@@ -869,7 +973,9 @@ class App(ctk.CTk):
         dep = self.e_deploy.get().strip()
         if dep:
             cfg['code']['deploy_to'] = dep
-        cfg['code']['update_catalog'] = True if self.v_updcatalog.get() else None
+        # 20.10 (аудит): round-trip галочки каталога — писали None (=True
+        # по умолчанию), эффекта «выключить и перезапустить» не было
+        cfg['code']['update_catalog'] = bool(self.v_updcatalog.get())
         cfg['code']['include_monolith'] = self.v_monolith.get()
         # 20.10: раскладка папок триггеров — конфиг↔UI вместе
         cfg['code']['folders'] = 'folders' if \
@@ -897,7 +1003,13 @@ class App(ctk.CTk):
 
     def _load_cfg(self):
         if not os.path.exists(CFG):
-            return
+            # 20.10 (аудит): самодостаточность — свежий клон без конфига
+            # не падает: создаётся каркас по умолчанию, потенциалы пребылд
+            # и пути карт пользователь вносит потом
+            self.cfg = json.loads(json.dumps(DEFAULT_CFG))    # глубокая копия
+            io.open(CFG, 'wb').write(json.dumps(self.cfg, indent=2,
+                                                ensure_ascii=False).encode('utf-8'))
+            self._log('создан конфиг по умолчанию: ' + CFG, 'ok')
         self.cfg = json.load(io.open(CFG, 'rb'))
         self.e_src.delete(0, 'end'); self.e_src.insert(0, self.cfg.get('source', ''))
         self.e_tgt.delete(0, 'end'); self.e_tgt.insert(0, self.cfg.get('target', ''))
@@ -958,6 +1070,12 @@ class App(ctk.CTk):
                     self.geometry(geo)
             except Exception:
                 pass
+        # 20.10 (аудит): выбор этапов восстанавливается из конфига —
+        # раньше stage_enabled ПИСАЛОСЬ, но не читалось: галочки этапов
+        # скидывались к зашитым дефолтам при каждом запуске GUI
+        se = self.cfg.get('stage_enabled') or {}
+        for s in STAGES:
+            self.stage_vars[s].set(bool(se.get(s, s not in ('geometry', 'testspawn'))))
         self._refresh_progress()
 
     def _cfg_path(self):
@@ -1007,27 +1125,52 @@ class App(ctk.CTk):
             self.q.put(('ОШИБКА ЗАПУСКА: %s' % e, 'err', None))
         finally:
             self.running = False
+            # 20.10 (аудит): разовый перенос выбором (окно «Триггеры...»)
+            # снимает only_dirs — иначе обычный прогон тихо урезался
+            if self._clear_only_dirs:
+                self._clear_only_dirs = False
+                self.cfg.get('code', {}).pop('only_dirs', None)
+                try:
+                    io.open(CFG, 'wb').write(json.dumps(self.cfg, indent=2,
+                                                        ensure_ascii=False).encode('utf-8'))
+                except Exception:
+                    pass
+            self._proc = None
             self.q.put(('__done__', None, None))
 
     def _worker_one(self, cmd, scope=None):
         try:
+            # 20.10 (аудит): PYTHONUTF8 — кириллица ребёнка не превращается
+            # в 'replace'-мусор при отсутствии штатной переменной; консоль
+            # под pythonw не мигает (CREATE_NO_WINDOW)
+            env = {**os.environ, 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8'}
+            flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     text=True, encoding='utf-8', errors='replace',
+                                    env=env, creationflags=flags,
                                     cwd=HERE, bufsize=1)
+            # 20.10 (аудит): ссылка для кнопки «Стоп»
+            self._proc = proc
             for line in proc.stdout:
                 line = line.rstrip()
                 if not line:
                     continue
                 low = line.lower()
                 tag = None
-                if 'ошибка' in low or 'error' in low or 'код 1' in low:
+                # 20.10 (аудит): убран критерий 'код 1' — ложные покраски
+                # обычных строк; код выхода красится своим тегом ниже
+                if 'ошибка' in low or 'error' in low:
                     tag = 'err'
                 elif 'внимание' in low or 'warning' in low:
                     tag = 'warn'
                 self.q.put((line, tag, scope))
             proc.wait()
+            self._proc = None
             self.q.put(('--- код выхода: %d ---' % proc.returncode,
                         'ok' if proc.returncode == 0 else 'err', scope))
+            # 20.10 (аудит): чипы прогресса обновляются после КАЖДОГО этапа,
+            # не только в конце прогона
+            self.q.put(('__refresh__', None, None))
         except Exception as e:
             # 19.09 (вечер): 3-элементная очередь
             self.q.put(('ОШИБКА ЗАПУСКА: %s' % e, 'err', None))
@@ -1046,13 +1189,19 @@ class App(ctk.CTk):
             desc = ' '.join(args)
         # 19.09 (вечер): service-команды (обслуживание) не фильтруются
         # в журнале; transfer-этапы скрыты в режиме Обслуживание
-        flat = ' '.join(desc)
+        # 20.10 (аудит): БАГ — desc уже строка; join давал ' - - v  e r i f y'
+        # и scope всегда 'transfer' (service-вывод глотался в Обслуживании)
+        flat = desc
         scope = 'transfer'
         for svc in ('--verify', '--cleanup', '--repair', '--triggers', '--status',
                     '--rollback', '--reset'):
             if svc in flat:
                 scope = None
                 break
+        # 20.10 (аудит): новый прогон — чистый журнал (старые сессии
+        # не наслаиваются в окне; на диске история остаётся)
+        self.log.delete('1.0', 'end')
+        self._log('>>> Профиль: %s' % self.cfg.get('name', ''), None, scope)
         self._log('>>> ' + desc, 'ok', scope)
         self.running = True
         # 20.09: прогресс-бар — сброс на старте прогона
@@ -1062,6 +1211,7 @@ class App(ctk.CTk):
         self.pct_lbl.configure(text='')
         self.status.configure(text='выполняется: ' + desc)
         self.head_status.configure(text='выполняется...')
+        self.b_stop.configure(state='normal')
         threading.Thread(target=self._worker, args=(cmds, scope), daemon=True).start()
 
     # ---------- окно триггеров ----------
@@ -1297,7 +1447,11 @@ class App(ctk.CTk):
         self._trigclean_state['dir'] = tgt
         n = 0
         for rel in res.get('empty_txt', []):
-            tree.insert('', 'end', values=('', os.path.basename(rel), '0', 'пустой .txt'))
+            # 20.10 (аудит): iid = ПОЛНЫЙ относительный путь — раньше(delete)
+            # сопоставлял по basename и при одинаковых именах .txt в разных
+            # папках удалял первую попавшуюся
+            tree.insert('', 'end', iid=rel,
+                        values=('', os.path.basename(rel), '0', 'пустой .txt'))
             n += 1
         for rel in res.get('empty_dirs', []):
             tree.insert('', 'end', values=('', rel, '', 'пустая папка'))
@@ -1345,10 +1499,10 @@ class App(ctk.CTk):
             if why.startswith('пустая папка'):
                 d['empty_dirs'].append(name)
             elif why.startswith('пустой .txt'):
-                for rel in scan.get('empty_txt', []):
-                    if os.path.basename(rel) == name:
-                        d['empty_txt'].append(rel)
-                        break
+                # 20.10 (аудит): iid строки = полный rel из скана — совпадение
+                # по basename выдавало первую попавшуюся при дубликатах имён
+                if item in [r for r in scan.get('empty_txt', [])]:
+                    d['empty_txt'].append(item)
             elif why.startswith('Disab') or why.startswith('Closed') or 'Disab' in why or 'Closed' in why:
                 for tr in scan.get('disabled', []):
                     if tr.get('disk') == name and tr.get('cat_disk') == cat:
@@ -1458,10 +1612,14 @@ class App(ctk.CTk):
 
         def do_transfer():
             sel = [lb.get(i).rsplit('  (', 1)[0] for i in lb.curselection()]
-            cfgp = self._cfg_path()
-            cfg = json.load(io.open(cfgp, 'rb'))
-            cfg.setdefault('code', {})['only_dirs'] = sel
-            io.open(cfgp, 'wb').write(json.dumps(cfg, indent=2, ensure_ascii=False).encode('utf-8'))
+            # 20.10 (аудит): правим ЖИВОЙ конфиг инстанса и сохраняем.
+            # Раньше правили файл на диске, но _save_cfg перезаписывал
+            # его из памяти — only_dirs молча терялся, переносилось ВСЁ.
+            self.cfg.setdefault('code', {})['only_dirs'] = sel
+            # 20.10 (аудит): after прогона only_dirs снимается (см. _worker) —
+            # иначе следующий обычный прогон был бы урезанным
+            self._clear_only_dirs = True
+            self._save_cfg()
             self._log('Перенос триггеров: %s -> %s' % (len(sel) if sel else 'ВСЁ', ', '.join(sel[:8]) + ('...' if len(sel) > 8 else '')))
             win.destroy()
             self._run([['--stage', 'code'], ['--stage', 'verify']])
@@ -1595,6 +1753,9 @@ class App(ctk.CTk):
         btns2 = ctk.CTkFrame(win, fg_color="transparent")
         btns2.pack(fill='x', padx=8, pady=(0, 2))
         self._cleanup_state = {'scan': None, 'tree': tree, 'win': win}
+        # 20.10 (аудит): iid-кэш фильтра сбрасывается при открытии окна —
+        # оставался от прошлого скана другой карты и молча не работал
+        self._cleanup_all_iids = None
 
         b_scan = ctk.CTkButton(btns, text='1. СКАН', height=36, font=("Segoe UI", 12, "bold"),
                                command=lambda: self._cleanup_scan(e_dir, v_unused, v_bad, v_suf, v_casc, e_suf))
@@ -1805,7 +1966,7 @@ class App(ctk.CTk):
         e_file = ctk.CTkEntry(row, font=FONT_MONO, height=30)
         e_file.pack(side='left', fill='x', expand=True, padx=6)
         last = self.cfg.get('deob', {}).get('last_path', '')
-        e_file.insert(0, last if last else self.e_tgt.get().strip())
+        e_file.insert(0, self._deob_default_path(last))
         Tooltip(e_file, 'Обычный JASS-скрипт (war3map.j / code.j).\nvJass-директивы //! сохраняются, но не разворачиваются.')
         ctk.CTkButton(row, text='...', width=36, height=30,
                       command=lambda: self._deob_pick(e_file)).pack(side='left')
@@ -1853,6 +2014,18 @@ class App(ctk.CTk):
             return r.returncode == 0, (r.stdout or '') + (r.stderr or '')
         except Exception as ex:
             return False, 'ошибка запуска deob.py: %s' % ex
+
+    def _deob_default_path(self, last):
+        # 20.10 (аудит): дефолт был папкой приёмника — первый СКАН всегда
+        # ловил «укажи файл .j». Папку карты превращаем в её монолит.
+        p = last or self.e_tgt.get().strip()
+        if p and os.path.isdir(p):
+            for cand in (os.path.join(p, 'map', 'war3map.j'),
+                         os.path.join(p, 'war3map.j'),
+                         os.path.join(p, 'trigger', 'code.j')):
+                if os.path.exists(cand):
+                    return cand
+        return p
 
     def _deob_scan(self, e_file, lbl):
         p = e_file.get().strip()

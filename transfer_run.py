@@ -32,6 +32,11 @@ PROFILES = {
 
 def load_cfg():
     # 18.09: читаем файл один раз (было двойное чтение)
+    # 20.10: дружелюбное сообщение вместо трейсбека на свежем клоне
+    if not os.path.exists(CFG_PATH):
+        print('ОШИБКА: конфиг не найден: %s' % CFG_PATH)
+        print('Запусти GUI (Утилита переноса.bat) — он создаст конфиг по умолчанию.')
+        sys.exit(2)
     return json.load(io.open(CFG_PATH, 'rb'))
 
 def cfg_dir():
@@ -66,7 +71,12 @@ def log(cfg, msg):
     line = '%s  %s' % (time.strftime('%Y-%m-%d %H:%M:%S'), msg)
     print(line)
     if d:
-        with io.open(os.path.join(d, 'transfer.log'), 'ab') as f:
+        # 20.10: журнал на КОНФИГ (пара карт), а не один общий:
+        # разные конфиги не перемешивают сессии друг с другом.
+        # Для дефолтного конфига имя прежнее (transfer.log).
+        stem = os.path.splitext(os.path.basename(CFG_PATH))[0]
+        fname = 'transfer.log' if stem == 'transfer_config' else stem + '.log'
+        with io.open(os.path.join(d, fname), 'ab') as f:
             f.write(line.encode('utf-8') + b'\n')
 
 def fhash(p):
@@ -319,8 +329,9 @@ def main():
 
 def _deps_sig(cfg):
     # 17.09: сигнатура deps (содержимое, не count) для сравнения итераций
+    # 20.10: рабочие файлы живут у конфига, а не у скрипта (мультиконфиг)
     import json
-    p = os.path.join(HERE, 'deps_result.json')
+    p = os.path.join(cfg_dir(), 'deps_result.json')
     if not os.path.exists(p):
         return ''
     d = json.load(io.open(p, 'rb'))
