@@ -1,0 +1,70 @@
+# ============================================
+# Рабочие артефакты пайплайна (создаётся утилитой)
+# ============================================
+logs/
+transfer_backup/
+transfer_state.json
+transfer_mapping.json
+transfer_mapping.pkl
+target_id_registry.json
+deps_result.json
+deploy_manifest.json
+deploy_manifest.json.*
+cleanup_*.json
+triggers_*.json
+mapping_report.txt
+M_init.txt
+ASCII log.txt
+
+# ============================================
+# Одноразовые диагностические/патчевые скрипты
+# прошлых сессий и синтетические тесты
+# (не часть пайплайна) + их артефакты
+# ============================================
+_diag_*
+_t_*
+_test_*
+_patch_*
+_study_*
+_dbg_*
+_doc_*
+_fix_*
+_pj*
+_jh_*
+_selftest_*
+t_*.j
+selftest_*.j
+*_map.csv
+*_out.j
+*_result.txt
+
+# ============================================
+# Стандартный Python
+# ============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+env/
+.venv/
+ENV/
+build/
+dist/
+*.egg-info/
+.eggs/
+.ipynb_checkpoints/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ============================================
+# IDE и ОС
+# ============================================
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+*.log

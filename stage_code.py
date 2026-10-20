@@ -1,0 +1,601 @@
+# 17.09: Этап code — замена литералов равкодов в .j коде по маппингу
+# Вход: transfer_mapping.json + cfg['code']['trigger_dirs'] (пусто = только UFS-папки
+# источника, заданные в cfg['code']['deploy_to']).
+# Литералы: 'Xyyy' в одинарных кавычках. Заменяются ТОЛЬКО ID из маппинга,
+# у которых old != new. B-литералы: проверка контекста не автоматизирована —
+# B-замены требуют подтверждения (выводятся в отчёт, заменяются только с --allow-b).
+import io, os, sys, json, re
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import deploy_manifest
+
+def doo_unit_types(p):
+    """21.09: типы юнитов на карте приёмника (map/war3mapUnits.doo).
+    Формат: 'W3do'(4) ver(4) subver(4) num(4), записи с 16, шаг 111 байт
+    (fixed + itemdata), typeId = первые 4 байта записи. Валидация:
+    найденных позиций >= num-2 иначе предупреждение."""
+    import struct
+    out = set()
+    if not os.path.exists(p):
+        return out, 0
+    s = io.open(p, 'rb').read()
+    num = struct.unpack_from('<I', s, 12)[0]
+    for i in range(num):
+        off = 16 + i * 111
+        if off + 4 > len(s):
+            break
+        rc = s[off:off + 4].decode('latin-1', errors='replace')
+        if re.match(r'^[A-Za-z][0-9A-Za-z]{3}$', rc):
+            out.add(rc)
+    return out, num
+
+
+def cat_parse_flags(text):
+    """catalog.lml донора -> {плоский ключ: [флаги]}.
+    21.09 фикс C: перенос флагов Run/Closed/Comment. Структура каталога:
+    0-индент — папки, 4-индент — записи-триггеры, 8-индент — флаги
+    записи. Ключ = 'папка запись' — ровно как деплой называет файлы
+    (плоско, префикс папки), поэтому сопоставление идёт по базовому
+    имени переносимого файла."""
+    out = {}
+    folder = None
+    cur_key = None
+    for l in text.splitlines():
+        if re.match(r'^\S', l):              # 0-индент: папка/разделитель
+            m = re.match(r"^'?(.*?)'?:", l)
+            folder = m.group(1) if m else None
+            cur_key = None
+        elif re.match(r'^    \S', l):        # 4-индент: запись
+            m = re.match(r"^    '?(.*?)'?:", l)
+            if m and m.group(1):
+                cur_key = (folder + ' ' + m.group(1)) if folder else m.group(1)
+                out.setdefault(cur_key, [])
+            else:
+                cur_key = None
+        elif cur_key is not None and re.match(r'^        \S', l):
+            out[cur_key].append(l.strip())   # 8-индент: флаг записи
+    return out
+
+def main():
+    cfgp = sys.argv[1]
+    dry = '--dry-run' in sys.argv
+    allow_b = '--allow-b' in sys.argv
+    cfg = json.load(io.open(cfgp, 'rb'))
+    here = os.path.dirname(os.path.abspath(cfgp))
+    src = cfg['source']
+    tgt = cfg['target']
+
+    mp = json.load(io.open(os.path.join(here, cfg['mapping']['pkl'].replace('.pkl', '.json')), 'rb'))
+    # литералы: old != new
+    lit = {}
+    for k, new in mp.items():
+        t, old = k.split(':', 1)
+        if old != new:
+            lit[old] = (new, t)
+
+    # какие .j файлы источника содержат литералы
+    # код: code-split/*.j (сплит) + trigger/*.j
+    # war3map.j (монолит всей карты) — ТОЛЬКО если явно включён в
+    # конфиге (полный перенос карты); для частичного он тащит чужой код
+    trig_src = os.path.join(src, 'trigger')
+    files = []
+    if cfg['code'].get('include_monolith'):
+        wj = os.path.join(src, 'map', 'war3map.j')
+        if os.path.exists(wj):
+            files.append(wj)
+    cs = os.path.join(src, 'code-split')
+    if os.path.isdir(cs):
+        for f in sorted(os.listdir(cs)):
+            if f.endswith('.j'):
+                files.append(os.path.join(cs, f))
+    # 18.09: only_dirs — переносить ТОЛЬКО выбранные подпапки
+    only = [d.strip() for d in cfg['code'].get('only_dirs', []) if d.strip()]
+    for root, dirs, fs in os.walk(trig_src):
+        rel_root = os.path.relpath(root, trig_src)
+        if only and rel_root != '.' and not any(rel_root == od or rel_root.startswith(od + os.sep) for od in only):
+            dirs[:] = []
+            continue
+        for f in fs:
+            if f.endswith('.j'):
+                files.append(os.path.join(root, f))
+
+    # 21.09 фикс D: GUI-триггеры донора = пары .lml+.txt в trigger/.
+    # .lml — тело GUI-триггера (редактор генерит из него Trig_X_Actions
+    # и InitTrig_X при сборке), .txt — описание. Переносим их как есть
+    # (нативный формат), НЕ инлайним в скрипт — инлайн ломал ссылки
+    # gg_trg_X (TriggerEvaluate(null) = false, триггер мёртв).
+    # Универсально: GUI-триггер = наличие .lml, .txt опционален.
+    gui_pairs = []
+    for root, dirs, fs in os.walk(trig_src):
+        rel_root = os.path.relpath(root, trig_src)
+        if only and rel_root != '.' and not any(rel_root == od or rel_root.startswith(od + os.sep) for od in only):
+            dirs[:] = []
+            continue
+        for f in sorted(fs):
+            if f.endswith('.lml') and f != 'catalog.lml' and f != 'variable.lml':
+                lml_p = os.path.join(root, f)
+                txt_p = lml_p[:-4] + '.txt'
+                gui_pairs.append((lml_p, txt_p if os.path.exists(txt_p) else None))
+
+    b_hits = []   # B-литералы (нужен контекст)
+    plain_hits = {}
+    # 21.09: типы юнитов приёмника (для null-конверта битых gg_unit)
+    map_units = None
+    null_hits = set()
+    doo_p = os.path.join(tgt, 'map', 'war3mapUnits.doo')
+    map_units, doo_n = doo_unit_types(doo_p)
+    if map_units:
+        print('типов юнитов на карте приёмника (doo):', len(map_units), '(записей:', str(doo_n) + ')')
+
+    # 20.09 fix №3: однопроходная замена литералов. Цикл замен подряд
+    # давал ЦЕПНЫЕ подмены (A001->B002, затем свежевставленный B002->X003).
+    # Один re.sub по всем токенам сразу: вставленный new повторно не матчится.
+    lit_sub = None
+    if lit:
+        toks = [t for t in lit if not (t[0] == 'B' and not allow_b)]
+        if toks:
+            # 20.09 fix №3b: ГРУППИРОВКА в скобки! Без них 'A001|B002' в
+            # regex = "'A001" ИЛИ "B002'" — матчилась любая пара кавычек
+            # ('ol' и пр.) → KeyError в _sub. Крах stage_code на живом прогоне.
+            pat_l = re.compile("'(" + "|".join(re.escape(t) for t in toks) + ")'")
+
+            def _sub(m):
+                return "'" + lit[m.group(1)][0] + "'"
+
+            lit_sub = (pat_l, _sub)
+
+    # 18.09 (v5): префикс функций импорта.
+    # Собираю имена всех функций донора из переносимых
+    # файлов, потом переименовываю объявления и вызовы.
+    prefix = cfg['code'].get('func_prefix', '').strip()
+    donor_funcs = set()
+    if prefix:
+        for p in files:
+            s = io.open(p, 'rb').read().decode('utf-8', errors='replace')
+            for m in re.finditer(r'\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)\b', s):
+                # 21.09: InitTrig_* НЕ префиксуются — редактор генерит
+                # вызовы InitTrig_<имя записи каталога> по значению
+                # записи, префикс ломает линковку триггеров.
+                if m.group(1).startswith('InitTrig_'):
+                    continue
+                donor_funcs.add(m.group(1))
+        print('префикс функций:', prefix, '| функций донора:', len(donor_funcs),
+              '| InitTrig_* пропущено')
+
+    for p in files:
+        s = io.open(p, 'rb').read().decode('utf-8', errors='replace')
+        for m in re.finditer(r"'([0-9A-Za-z]{4})'", s):
+            tok = m.group(1)
+            if tok in lit:
+                new, t = lit[tok]
+                # 20.09 fix №6: было `tok.lower() in {k.lower() ...}` —
+                # тавтология (tok уже B-литерал из lit). Любой B-токен
+                # требует контекста — упрощено до проверки префикса.
+                if tok[0] == 'B':
+                    # B: и баффы и декор — нужен контекст
+                    b_hits.append((p, tok, new, t))
+                else:
+                    plain_hits.setdefault(p, set()).add((tok, new))
+
+    print('.j файлов источника:', len(files))
+    print('обычных литералов для замены:', sum(len(v) for v in plain_hits.values()), 'в', len(plain_hits), 'файлах')
+    for p2, pairs in sorted(plain_hits.items()):
+        ps = sorted(pairs)
+        print('  %s: %d (%s%s)' % (os.path.basename(p2), len(ps), ', '.join(a+'->'+b for a, b in ps[:6]), ' ...' if len(ps) > 6 else ''))
+    print('B-литералов (нужен контекст):', len(b_hits))
+    for p, tok, new, t in b_hits[:10]:
+        print('  ', os.path.basename(p), tok, '->', new, '(' + t + ')')
+
+    if dry:
+        print('(dry-run: файлы не копируются)')
+        return
+
+    # 20.09: purge артефактов прошлого деплоя ПО МАНИФЕСТУ.
+    # Смена версии утилиты / deploy_to / набора папок оставляла
+    # "поколения" файлов (дубли в редакторе). Чистим только то,
+    # что записано в манифесте — никогда не сканируем вслепую.
+    # keep = файлы, которые НОВЫЙ прогон сейчас запишет (не трогаем).
+    # deploy_to/entry_name нужны purge ДО записи — определяю здесь.
+    deploy_to = cfg['code'].get('deploy_to', 'UFS')
+    cat_p0 = os.path.join(tgt, 'trigger', 'catalog.lml')
+    entry_name = deploy_to
+    if os.path.exists(cat_p0):
+        cat0 = io.open(cat_p0, 'rb').read().decode('utf-8', errors='replace')
+        m0 = re.search(r"^'(\d{3}-" + re.escape(deploy_to) + r")':", cat0, re.M)
+        if m0:
+            entry_name = m0.group(1)
+    keep = set()
+    old_m = deploy_manifest.load_manifest(cfgp)
+    if old_m:    # 20.09 fix №6: dry выходит return-ом выше — not dry мёртвое
+        for p in files:
+            # 20.09 fix №1: монолит war3map.j — relpath от trig_src даёт
+            # '..\map\...' → файл уезжал в КОРЕНЬ trigger/ мимо папки деплоя.
+            # Явный путь: <entry>\war3map.j
+            if os.path.basename(p) == 'war3map.j' and 'trigger' not in os.path.relpath(p, src):
+                keep.add(os.path.join('trigger', entry_name, 'war3map.j').replace(os.sep, '/'))
+                continue
+            rel = os.path.relpath(p, trig_src)
+            folder = os.path.dirname(rel)
+            if 'code-split' in p:
+                keep.add(os.path.join('trigger', entry_name,
+                                      'code-split ' + os.path.basename(p)).replace(os.sep, '/'))
+            elif folder and folder != '.':
+                keep.add(os.path.join('trigger', entry_name,
+                                      folder + ' ' + os.path.basename(p)).replace(os.sep, '/'))
+            else:
+                keep.add(os.path.join('trigger', entry_name, os.path.basename(p)).replace(os.sep, '/'))
+        # 21.09 фикс D: GUI-пары тоже в keep (плоское имя, как у .j)
+        for lml_p, txt_p in gui_pairs:
+            rel = os.path.relpath(lml_p, trig_src)
+            folder = os.path.dirname(rel)
+            base = os.path.splitext(os.path.basename(rel))[0]
+            flat = (folder + ' ' + base) if folder and folder != '.' else base
+            keep.add(os.path.join('trigger', entry_name, flat + '.lml').replace(os.sep, '/'))
+            if txt_p:
+                keep.add(os.path.join('trigger', entry_name, flat + '.txt').replace(os.sep, '/'))
+        # 20.09: keep_e — ключи записей каталога нового прогона.
+        # Даже если запись \d{3}-X уже есть (cat_add не добавит),
+        # purge не должен сносить её: deploy_to и entry_name живут.
+        keep_e = {deploy_to, entry_name}
+        removed, warns = deploy_manifest.purge(cfgp, tgt, keep=keep, keep_e=keep_e)
+        for w in warns:
+            print(w)
+
+    # копируем файлы с заменами в target/trigger/<deploy_to>
+    # (deploy_to/entry_name/cat_p0 определены выше — purge)
+
+    # 18.09 (v4): подпапки раскладываю в КОРЕНЬ trigger/
+    # (редактор ищет папки записей в корне, не в deploy_to).
+    # Сам deploy_to остаётся ПУСТОЙ папкой-разделителем.
+    trig_tgt = os.path.join(tgt, 'trigger')
+    dst_dir = os.path.join(trig_tgt, entry_name)
+    os.makedirs(dst_dir, exist_ok=True)
+    n = 0
+    written = []    # 20.09: манифест — что реально записали
+    cat_added = []  # 20.09: манифест — ключи записей каталога, добавленных этим прогоном
+    header_rel = None    # 20.09 fix №4: путь header-файла (file-режим) — исключение из секции каталога
+    # 18.09 (v5-fix): шапка донора (code.j в корне trigger)
+    # уходит в header-режим — из основного цикла исключаю,
+    # иначе функции продублируются (<entry>_code.j + header)
+    header_src = os.path.join(trig_src, 'code.j')
+    skip_header = os.path.exists(header_src)
+    for p in files:
+        if skip_header and os.path.abspath(p) == os.path.abspath(header_src):
+            continue
+        s = io.open(p, 'rb').read().decode('utf-8', errors='replace')
+        s2 = lit_sub[0].sub(lit_sub[1], s) if lit_sub else s
+        # 18.09 (v5): префикс функций — объявления и вызовы.
+        # Только имена функций донора, не нативы/константы.
+        if prefix and donor_funcs:
+            for fn in donor_funcs:
+                s2 = re.sub(r'\bfunction\s+' + fn + r'\b', 'function ' + prefix + fn, s2)
+                s2 = re.sub(r'\b(call|executeFunc|ExecuteFunc)\s*\(\s*' + fn + r'\b', r'\1 ' + prefix + fn, s2)
+                # 20.09 fix №5: строковые вызовы ExecuteFunc("Имя") —
+                # в доноре JAR106e есть (5-Damage Engine.j), без этого
+                # вызов улетал бы в несуществующую функцию после префиксации
+                s2 = re.sub(r'(?i)(executefunc\s*\(\s*")' + fn + r'(")', r'\g<1>' + prefix + fn + r'\g<2>', s2)
+                s2 = re.sub(r'\b' + fn + r'\s*\(', prefix + fn + '(', s2)
+        # 20.09: файлы донора без литералов/префикса тоже переносим
+        # (копия как есть), иначе чистые триггеры молча терялись.
+        # 20.09 fix №6: было `if s2 != s or True:` — выродившийся фикс
+        # «файлы без литералов», всегда истина. Условие не нужно.
+        # (s2 == s — копия как есть), иначе чистые триггеры молча
+        # терялись. dst-правила те же (v6: плоско + префикс папки).
+
+        # 21.09: битые gg_unit_XXX_YYYY -> null (по заказу юзера, ВКЛ
+        # по умолчанию). Юнит-тип сверяется с map/war3mapUnits.doo
+        # ПРИЁМНИКА: редактор объявляет gg_unit только для юнитов,
+        # стоящих на карте. Ссылка на отсутствующий тип = undefined
+        # переменная -> каскад ошибок компиляции.
+        if cfg['code'].get('null_broken_gguits', True) and map_units is not None:
+            def _gg_null(m):
+                if m.group(1).lower() not in map_units and m.group(1) not in map_units:
+                    null_hits.add(m.group(0))
+                    return 'null'
+                return m.group(0)
+            s2 = re.sub(r'gg_unit_([A-Za-z0-9]{4})_\w+', _gg_null, s2)
+
+        if True:
+            # 18.09 (v6): редактор НЕ поддерживает подпапки!
+            # Все файлы донора -> ПЛОСКО в <entry>\ ,
+            # подпапка = префикс имени файла:
+            #   trigger\14-Шандрис\1-ShotMaster.j
+            #   -> 213-FW\14-Шандрис - Лучница 1-ShotMaster.j
+            # code-split\ -> <entry>\code-split <имя>.j
+            # 20.09 fix №1: монолит — явный dst в папке деплоя
+            if os.path.basename(p) == 'war3map.j' and 'trigger' not in os.path.relpath(p, src):
+                dst = os.path.join(dst_dir, 'war3map.j')
+            elif 'code-split' in p:
+                dst = os.path.join(dst_dir, 'code-split ' + os.path.basename(p))
+            else:
+                rel = os.path.relpath(p, trig_src)
+                folder = os.path.dirname(rel)
+                if folder and folder != '.':
+                    # подпапка донора -> префикс в имени файла
+                    # 20.09 fix: os.walk уже спустился в подпапку —
+                    # relpath от trig_src даёт '01-Main', но p сам
+                    # содержит '01-Main' в пути от os.walk(root=подпапка)?
+                    # Нет: p = trig_src/01-Main/1-alpha.j, rel='01-Main/1-alpha.j'.
+                    # Двойной префикс был из-за walk по cs + trig_src.
+                    dst = os.path.join(dst_dir, folder + ' ' + os.path.basename(p))
+                else:
+                    # корневой файл донора (не code.j — он в header)
+                    dst = os.path.join(dst_dir, os.path.basename(p))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            io.open(dst, 'wb').write(s2.encode('utf-8'))
+            written.append(os.path.relpath(dst, tgt).replace(os.sep, '/'))
+            n += 1
+    print('файлов с заменами записано:', n, '->', deploy_to)
+    # 21.09: отчёт null-конверта
+    if null_hits:
+        print('битых gg_unit -> null: %d переменных (%d типов)' % (len(null_hits), len({h[8:12] for h in null_hits})))
+    elif map_units is not None:
+        print('битых gg_unit не найдено')
+    if map_units is not None and not map_units:
+        print('ВНИМАНИЕ: doo приёмника пуст/не найден — null-конверт пропущен')
+    if b_hits and not allow_b:
+        print('ВНИМАНИЕ: B-литералы НЕ заменены (нужен контекст, --allow-b)')
+
+    # 21.09 фикс D: копирование GUI-пар (.lml+.txt) в папку деплоя,
+    # плоско с префиксом папки — как .j файлы. Литералы в .lml живут
+    # без кавычек (Const : A001) — lit_sub их не трогает; если GUI-
+    # триггер ссылает литерал из маппинга, он заменяется на этапе
+    # таблиц (ID в таблицах приёмника уже новые). Префиксация функций
+    # к .lml не применяется: тела GUI генерит редактор.
+    n_gui = 0
+    for lml_p, txt_p in gui_pairs:
+        rel = os.path.relpath(lml_p, trig_src)
+        folder = os.path.dirname(rel)
+        base = os.path.splitext(os.path.basename(rel))[0]
+        flat = (folder + ' ' + base) if folder and folder != '.' else base
+        io.open(os.path.join(dst_dir, flat + '.lml'), 'wb').write(
+            io.open(lml_p, 'rb').read())
+        written.append(os.path.relpath(os.path.join(dst_dir, flat + '.lml'), tgt).replace(os.sep, '/'))
+        n_gui += 1
+        if txt_p:
+            io.open(os.path.join(dst_dir, flat + '.txt'), 'wb').write(
+                io.open(txt_p, 'rb').read())
+            written.append(os.path.relpath(os.path.join(dst_dir, flat + '.txt'), tgt).replace(os.sep, '/'))
+    if n_gui:
+        print('GUI-триггеров (пары .lml+.txt) перенесено:', n_gui)
+
+    # 18.09 (v5): шапка донора — header-режим.
+    # Донор с триггерами имеет code.j в корне trigger
+    # (шапка с хелперами, нужная триггерам ДО их компиляции).
+    header_mode = cfg['code'].get('header_mode', 'file')
+    if os.path.exists(header_src) and not dry:
+        hs = io.open(header_src, 'rb').read().decode('utf-8', errors='replace')
+        hs2 = lit_sub[0].sub(lit_sub[1], hs) if lit_sub else hs
+        # 18.09 (v5-fix): префикс функций и в шапке тоже
+        if prefix and donor_funcs:
+            for fn in donor_funcs:
+                hs2 = re.sub(r'\bfunction\s+' + fn + r'\b', 'function ' + prefix + fn, hs2)
+                hs2 = re.sub(r'\b(call|executeFunc|ExecuteFunc)\s*\(\s*' + fn + r'\b', r'\1 ' + prefix + fn, hs2)
+                # 20.09 fix №5: строковые вызовы ExecuteFunc("Имя")
+                hs2 = re.sub(r'(?i)(executefunc\s*\(\s*")' + fn + r'(")', r'\g<1>' + prefix + fn + r'\g<2>', hs2)
+                hs2 = re.sub(r'\b' + fn + r'\s*\(', prefix + fn + '(', hs2)
+        # 21.09: null-конверт и в шапке (code.j донора тоже ссылается на юнитов)
+        if cfg['code'].get('null_broken_gguits', True) and map_units is not None:
+            def _gg_null_h(m):
+                if m.group(1).lower() not in map_units and m.group(1) not in map_units:
+                    null_hits.add(m.group(0))
+                    return 'null'
+                return m.group(0)
+            hs2 = re.sub(r'gg_unit_([A-Za-z0-9]{4})_\w+', _gg_null_h, hs2)
+        if header_mode == 'append':
+            # 21.09 v2: globals донора НЕ дописываются в конец —
+            # редактор собирает все globals в ОДНУ секцию в начале
+            # war3map.j, вторая globals-секция после функций = cascade
+            # ('Statement outside of function' тысячи штук). Разбор:
+            # globals-блок донора вливается в РОДНУЮ globals-секцию
+            # приёмника (перед её endglobals), функции — в конец.
+            tgt_header = os.path.join(trig_tgt, 'code.j')
+            beg = '// === %s header (перенос) ===' % deploy_to
+            endm = '// === конец %s header ===' % deploy_to
+            if os.path.exists(tgt_header):
+                th = io.open(tgt_header, 'rb').read().decode('utf-8', errors='replace')
+                pat = re.escape(beg) + r'[\s\S]*?' + re.escape(endm) + r'\n?'
+                th = re.sub(pat, '', th)
+                # 21.09: разбор донорского header на globals-часть и код
+                hlines = hs2.replace('\r\n', '\n').split('\n')
+                # границы первой globals...endglobals (тела vJass library
+                # уже свёрнуты в доноре? нет — code.j донора сырой: globals
+                # на верху, внутри — только глобальные декларации)
+                g_start = g_end = None
+                depth = 0
+                for i, l in enumerate(hlines := hs2.replace('\r\n', '\n').split('\n')):
+                    st = l.strip()
+                    if st == 'globals' and g_start is None:
+                        g_start = i
+                        depth += 1
+                    elif st == 'endglobals' and g_start is not None:
+                        g_end = i
+                        break
+                if g_start is not None and g_end is not None:
+                    don_g = '\n'.join(hlines[g_start + 1:g_end]).rstrip()
+                    donor_code = '\n'.join(hlines[:g_start] + hlines[g_end + 1:])
+                    # родной globals приёмника: первая globals...endglobals
+                    t_start = t_end = None
+                    for i, l in enumerate(th.replace('\r\n', '\n').split('\n')):
+                        st = l.strip()
+                        if st == 'globals' and t_start is None:
+                            t_start = i
+                        elif st == 'endglobals' and t_start is not None:
+                            t_end = i
+                            break
+                    if t_start is not None and t_end is not None:
+                        tl = th.replace('\r\n', '\n').split('\n')
+                        # 21.09: имя globals-строки = [constant] TYPE (array)? NAME
+                        # ('boolean array seen' -> seen, 'integer n = 0' -> n)
+                        GV = r'\s*(?:constant\s+)?(\w+)\s+(?:array\s+)?(\w+)\s*(?:=.*)?$'
+
+                        def gname(line):
+                            mm = re.match(GV, line)
+                            return mm.group(2) if mm else None
+                        have = set()
+                        for l in tl[t_start + 1:t_end]:
+                            nm = gname(l)
+                            if nm:
+                                have.add(nm)
+                        add_lines = []
+                        for l in hlines[g_start + 1:g_end]:
+                            nm = gname(l)
+                            if nm and nm not in have:
+                                add_lines.append(l)
+                        new_g = '\n'.join(tl[t_start + 1:t_end]).rstrip('\n')
+                        if add_lines:
+                            new_g += '\n' + '\n'.join(add_lines).rstrip()
+                        # склейка: до globals + расширенный globals + после + донор-код
+                        th2 = (('\n'.join(tl[:t_start]) + '\n'
+                                if t_start else '')
+                               + 'globals\n' + new_g + '\nendglobals\n'
+                               + '\n'.join(tl[t_end + 1:])).rstrip()
+                        print('шапка донора: globals слиты в родную секцию (%d строк добавлено)' % len(add_lines))
+                    else:
+                        # у приёмника нет globals — донорский код как есть
+                        donor_code = hs2
+                        th2 = th.rstrip()
+                    th2 = th2.rstrip() + '\n\n' + beg + '\n' + donor_code.rstrip() + '\n' + endm + '\n'
+                else:
+                    # донор без globals-секции — старое поведение
+                    th2 = th.rstrip() + '\n\n' + beg + '\n' + hs2.rstrip() + '\n' + endm + '\n'
+                io.open(tgt_header, 'wb').write(th2.encode('utf-8'))
+                print('шапка донора: дописана в code.j приёмника (блок %s)' % beg)
+                header_block_name = deploy_to    # 20.09: в манифест (purge старого блока при смене deploy_to)
+            else:
+                print('шапка донора: code.j приёмника не найден — пропуск')
+        else:
+            # отдельный файл <entry>-header.j + запись в каталоге
+            # ПЕРЕД разделителем <entry_name>
+            hf = os.path.join(trig_tgt, entry_name + '-header.j')
+            io.open(hf, 'wb').write(hs2.encode('utf-8'))
+            written.append(os.path.relpath(hf, tgt).replace(os.sep, '/'))    # 20.09: манифест
+            # 20.09 fix №4: header-файл НЕ должен попадать ребёнком в секцию
+            # каталога — его запись уже вставляется top-level перед
+            # разделителем (иначе дубль: top-level + ребёнок).
+            header_rel = os.path.relpath(hf, tgt).replace(os.sep, '/')
+            print('шапка донора: записана в', hf)
+            cat_p2 = os.path.join(trig_tgt, 'catalog.lml')
+            if os.path.exists(cat_p2):
+                cat2 = io.open(cat_p2, 'rb').read().decode('utf-8', errors='replace')
+                hname = entry_name + '-header'
+                have_h = re.search(r"^'?" + re.escape(hname) + r"'?:", cat2, re.M)
+                if have_h:
+                    print('catalog.lml: запись', hname, 'уже есть')
+                else:
+                    cat_added.append(hname)    # 20.09: манифест
+                    # вставить ПЕРЕД разделителем <entry_name>
+                    # 20.09 fix №4: esc() — апостроф в имени ломал каталог
+                    esc_h = lambda x: x.replace(chr(39), chr(39) * 2)
+                    m_ins = re.search(r"^'?" + re.escape(entry_name) + r"'?:", cat2, re.M)
+                    hline = "'" + esc_h(hname) + "': '" + esc_h(deploy_to) + " header'\n"
+                    if m_ins:
+                        cat2 = cat2[:m_ins.start()] + hline + cat2[m_ins.start():]
+                        io.open(cat_p2, 'wb').write(cat2.encode('utf-8'))
+                        print('catalog.lml: запись', hname, 'вставлена перед', entry_name)
+                    else:
+                        cat2 = cat2.rstrip() + "\n" + hline
+                        io.open(cat_p2, 'wb').write(cat2.encode('utf-8'))
+                        print('catalog.lml: запись', hname, 'дописана в конец (разделитель не найден)')
+
+    # 20.09 ПЕРЕПИСАНО: каталог приёмника НЕ СКАНИРУЕМ НИКОГДА
+    # (инцидент MAPTEST: автодописка вписала 1938 строк мусора —
+    # все папки «не из каталога», включая отключённые и пустые;
+    # редактор показал их живыми триггерами, карта развалилась).
+    # Пишем ТОЛЬКО свою секцию: разделитель deploy_to + наши файлы.
+    # Секция идемпотентна: при повторе прогона заменяется целиком,
+    # дубли имён невозможны по построению.
+    if n and cfg['code'].get('update_catalog', True):
+        cat_p = os.path.join(tgt, 'trigger', 'catalog.lml')
+        if os.path.exists(cat_p):
+            cat = io.open(cat_p, 'rb').read().decode('utf-8', errors='replace')
+
+            def esc(x):
+                return x.replace(chr(39), chr(39) * 2)
+
+            def need_q(x):
+                return not re.match(r'^[0-9A-Za-z_-]+$', x)
+
+            # 20.09 fix №10: значение записи = ИМЯ ТРИГГЕРА (после
+            # номера файла), НЕ 'папка+файл'. Редактор генерит
+            # InitTrig_<значение> и gg_trg_<значение>: при значении
+            # 'Main 1-notepad' редактор создаст InitTrig_Main_1_notepad,
+            # а код зовёт InitTrig_notepad -> триггеры не слинкуются.
+            # Донор: '2-InicHero': 'InicHero'; имя может быть с пробелом:
+            # '5-Damage Engine' -> 'Damage Engine'.
+            def disp_of(x):
+                m = re.search(r'\s\d+-', x)
+                return x[m.end():] if m else (x.split('-', 1)[-1] if '-' in x else x)
+
+            def kv(key, disp, indent):
+                q = need_q(key) or need_q(disp)
+                k = ("'" + esc(key) + "'") if q else key
+                d = ("'" + esc(disp) + "'") if q else disp
+                return indent + k + ': ' + d
+
+            # наша секция: разделитель + наши файлы (с отступом 4)
+            # 20.09 fix №2: ключ секции = entry_name (имя ПАПКИ деплоя),
+            # не deploy_to — при нумерованной записи '213-JAR' в каталоге
+            # файлы лежат в 213-JAR/, а дети должны быть под '213-JAR:',
+            # иначе редактор не свяжет их с папкой.
+            # 21.09 фикс C: флаги записей (Run/Closed/Comment) берём из
+            # каталога ДОНОРА — сопоставление по плоскому ключу
+            # 'папка запись' (= базовое имя файла деплоя).
+            donor_flags = {}
+            cat_src_p = os.path.join(trig_src, 'catalog.lml')
+            if os.path.exists(cat_src_p):
+                donor_flags = cat_parse_flags(
+                    io.open(cat_src_p, 'rb').read().decode('utf-8', errors='replace'))
+            out = [kv(entry_name, disp_of(entry_name), '')]
+            for rel in sorted(written):
+                # 20.09 fix №4: header-файл (file-режим) в секцию не пишем —
+                # его запись уже стоит top-level перед разделителем
+                if rel == header_rel:
+                    continue
+                # 21.09 фикс D: .txt (описание GUI-триггера) — не запись
+                # каталога, это спутник .lml; запись уже добавлена с .lml
+                if rel.endswith('.txt'):
+                    continue
+                base = os.path.splitext(os.path.basename(rel))[0]
+                # '01-Main 1-notepad.j' -> под ключом '01-Main 1-notepad'
+                out.append(kv(base, disp_of(base), '    '))
+                # 21.09 фикс C: флаги донора под записью (8-индент)
+                for fl in donor_flags.get(base, []):
+                    out.append('        ' + fl)
+            section = chr(10).join(out) + chr(10)
+            # purge старой секции: от разделителя entry_name до следующей
+            # записи верхнего уровня (или конца файла)
+            # 20.09 fix №2: чистим по ОБОИМ ключам — deploy_to (писали раньше)
+            # и entry_name (пишем теперь), при смене нумерации старая
+            # секция не должна оставаться.
+            for sec_key in {deploy_to, entry_name}:
+                pat = re.compile(r"^'?" + re.escape(sec_key) + r"'?:[^\n]*\n(?:(?:    [^\n]*)\n)*", re.M)
+                cat = pat.sub('', cat, count=1)
+            cat2 = cat.rstrip() + chr(10) + section
+            io.open(cat_p, 'wb').write(cat2.encode('utf-8'))
+            print('catalog.lml: своя секция %s (%d строк: разделитель + %d файлов)' % (deploy_to, len(out), len(out) - 1))
+        else:
+            print('catalog.lml не найден в приёмнике — пропускаю')
+
+    # 20.09: запись манифеста деплоя (purge следующего прогона).
+    # header_block: имя header-блока в code.j (append-режим), если писали.
+    # merge_section: манифест общий с globals/code_cut — пишем
+    # только свою секцию, чужие секции не затираем.
+    if not dry:
+        m = {
+            'deploy_to': deploy_to,
+            'files': sorted(written),
+            # 20.09 fix: deploy_to/entry_name — в манифесте ВСЕГДА:
+            # purge следующего прогона обязан снести запись каталога
+            # при смене deploy_to (разделитель пишет автодописка ИЛИ
+            # он уже есть от прошлого деплоя — в обоих случаях он наш).
+            'catalog_entries': sorted(set(cat_added) | {deploy_to, entry_name}),
+            'header_block': locals().get('header_block_name'),
+        }
+        deploy_manifest.merge_section(cfgp, 'code', m)
+        # хеши: по files нашей секции (merge сохранил чужие)
+        full = deploy_manifest.load_manifest(cfgp) or {}
+        deploy_manifest.record_hashes(cfgp, full, tgt)
+        print('манифест деплоя: %d файлов, %d записей каталога' % (len(m['files']), len(m['catalog_entries'])))
+
+if __name__ == '__main__':
+    main()

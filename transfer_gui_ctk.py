@@ -1,0 +1,2077 @@
+# 18.09: GUI для утилиты переноса — CustomTkinter (переписан с transfer_gui.py, поведение 1-в-1)
+# Запуск: Утилита переноса.bat (pythonw)
+import io, os, sys, json, subprocess, threading, queue
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox
+import time
+import customtkinter as ctk
+
+import stage_cleanup as sc
+import stage_repair as sr
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+CFG = os.path.join(HERE, 'transfer_config.json')
+
+STAGES = ['mapping', 'registry', 'deps', 'tables', 'import', 'code', 'code_cut', 'globals', 'geometry', 'testspawn', 'verify']
+STAGE_LABELS = {
+    'mapping': 'Маппинг ID',
+    'registry': 'Реестр ID приёмника',
+    'deps': 'Граф зависимостей',
+    'tables': 'Перенос таблиц (ini)',
+    'import': 'Импорт ассетов',
+    'code': 'Код (папки триггеров)',
+    'code_cut': 'Вырезка из монолита',
+    'globals': 'Глобальные переменные',
+    'geometry': 'Геометрия (декор/юниты)',
+    'testspawn': 'TestSpawn',
+    'verify': 'Верификация',
+}
+STAGE_HINTS = {
+    'mapping': 'Сопоставляет ID объектов источника и приёмника. Конфликтные получают новые ID (режим выбирается справа).',
+    'registry': 'Собирает все занятые ID приёмника, чтобы новые ID не конфликтовали с существующими.',
+    'deps': 'От корней (герои/предметы) тянет всё зависимое: способности, бафы, дамми-юниты, ассеты.',
+    'tables': 'Копирует секции [ID] из ini таблиц источника в приёмник с новыми ID.',
+    'import': 'Копирует иконки/модели/звуки. Одинаковые файлы пропускает, разные переименовывает v2.',
+    'code': 'Переносит папки триггеров с заменой литералов ID и дописывает catalog.lml.',
+    'code_cut': 'Вырезает функции героя из монолита war3map.j донора (для карт без исходника).',
+    'globals': 'Переносит блок globals из war3map.j источника в отдельный .j файл приёмника. gg_* пропускаются, конфликты имён — в отчёте: имя+тип совпали = пропуск, тип разный = блокировка.',
+    'geometry': 'Вставка декора/юнитов в doo. РЕДКО нужно! Риск задвоения при повторном прогоне.',
+    'testspawn': 'Генерирует .j для спавна перенесённых героев в игре (проверка что всё живое).',
+    'verify': 'Проверяет приёмник: битые ссылки, дубли секций, циклы _parent, imp.ini. Ломает прогон при ошибках.',
+}
+SHORT = {
+    'mapping': 'Маппинг', 'registry': 'Реестр', 'deps': 'Завис.',
+    'tables': 'Таблицы', 'import': 'Импорт', 'code': 'Код',
+    'code_cut': 'Вырезка', 'globals': 'Глобалы', 'geometry': 'Геометр.',
+    'testspawn': 'Спавн', 'verify': 'Вериф.',
+}
+
+FONT = ("Segoe UI", 12)
+FONT_SMALL = ("Segoe UI", 11)
+FONT_MONO = ("Consolas", 10)
+
+# тема из конфига до создания окна
+def _load_theme_name():
+    try:
+        g = json.load(io.open(CFG, 'rb')).get('gui', {})
+        return 'dark' if str(g.get('theme', 'dark')).lower() == 'dark' else 'light'
+    except Exception:
+        return 'dark'
+
+APPEARANCE = _load_theme_name()
+ctk.set_appearance_mode(APPEARANCE)
+
+
+class Tooltip:
+    """Всплывающая подсказка (тёмная/светлая по теме)."""
+
+    def __init__(self, widget, text, wraplength=380):
+        self.widget = widget
+        self.text = text
+        self.wraplength = wraplength
+        self.tip = None
+        widget.bind("<Enter>", self._show)
+        widget.bind("<Leave>", self._hide)
+
+    def _show(self, _e=None):
+        if self.tip:
+            return
+        mode = ctk.get_appearance_mode()
+        bg = "#2b2b2b" if mode == "Dark" else "#1f2937"
+        fg = "#f5f5f5" if mode == "Dark" else "#f9fafb"
+        x = self.widget.winfo_rootx() + 15
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry(f"+{x}+{y}")
+
+        tk.Label(self.tip, text=self.text, justify="left", bg=bg, fg=fg,
+                wraplength=self.wraplength, padx=8, pady=5,
+                font=("Segoe UI", 9)).pack()
+        self.tip.wm_deiconify()
+
+    def _hide(self, _e=None):
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
+
+def hint(widget, text):
+    try:
+        Tooltip(widget, text)
+    except Exception:
+        pass
+
+
+class App(ctk.CTk):
+    # 29.09: авто-подгонка Toplevel-окон под контент (правило: нижние
+    # кнопки не должны обрезаться). Окно растёт под содержимое, но не
+    # выше 90% экрана; ресайз разрешён.
+    def _fit_toplevel(self, win, min_w=None, min_h=None):
+        win.update_idletasks()
+        req_w = win.winfo_reqwidth()
+        req_h = win.winfo_reqheight()
+        sw = win.winfo_screenwidth()
+        sh = win.winfo_screenheight()
+        max_w = int(sw * 0.9)
+        max_h = int(sh * 0.9)
+        w = max(req_w, min_w or 0)
+        h = max(req_h, min_h or 0)
+        w = min(w, max_w)
+        h = min(h, max_h)
+        # центр к главному окну
+        try:
+            mx = self.winfo_rootx() + (self.winfo_width() - w) // 2
+            my = self.winfo_rooty() + (self.winfo_height() - h) // 2
+        except Exception:
+            mx, my = (sw - w) // 2, (sh - h) // 2
+        mx = max(0, min(mx, sw - w))
+        my = max(0, min(my, sh - h))
+        win.geometry('%dx%d+%d+%d' % (w, h, mx, my))
+        win.minsize(min(300, w), min(200, h))
+
+    def __init__(self):
+        super().__init__()
+        self.title('Утилита переноса объектов между картами (w3x2lni) — v6 CTk')
+        # 20.09: контенту нужно ~1130px высоты — окно 860 давило журнал
+        # и ленту прогресса. Поднимаем до 1200x1150.
+        self.geometry('1200x1150')
+        # 20.09: сохранённая геометрия из конфига не должна выдавливать
+        # статусбар/кнопки за край — минимум 1180x1130
+        self.minsize(1180, 1130)
+        self.cfg = {}
+        self.stage_vars = {}
+        self.q = queue.Queue()
+        self.running = False
+        self.log_size = 9
+
+        self._build()
+        self._load_cfg()
+        # 19.09 (v7-fix): восстановить режим ПОСЛЕ
+        # отрисовки окна (configure до первого рендера
+        # ломает pack-геометрию главного окна — окно
+        # остаётся 200x200, кнопки не нажимаются)
+        if self.cfg.get('ui', {}).get('mode') == 'service':
+            self.mode_seg.set('Обслуживание')
+            self.after(300, self._apply_mode)
+        self.after(100, self._poll_log)
+
+    # ---------- построение UI ----------
+
+    def _card(self, parent, title):
+        """Карточка-секция с заголовком, возвращает inner."""
+        f = ctk.CTkFrame(parent, fg_color=("gray92", "gray14"), corner_radius=8)
+        ctk.CTkLabel(f, text=title, font=("Segoe UI", 12, "bold"),
+                     anchor="w").pack(fill="x", padx=12, pady=(8, 2))
+        inner = ctk.CTkFrame(f, fg_color="transparent")
+        inner.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+        return f, inner
+
+    def _apply_mode(self):
+        """19.09 (v7): режим Перенос/Обслуживание.
+        Обслуживание — только приёмник: донор-этапы и
+        кнопки переноса disabled, кнопки обслуживания активны."""
+        serv = self.mode_seg.get() == 'Обслуживание'
+        # поля донора
+        try:
+            self.e_src.configure(state='disabled' if serv else 'normal')
+            self.e_name.configure(state='disabled' if serv else 'normal')
+        except Exception:
+            pass
+        # этапы — все disabled в обслуживании (прогон не используется)
+        for s, v in self.stage_vars.items():
+            for cb in self._stage_cbs.get(s, []):
+                cb.configure(state='disabled' if serv else 'normal')
+        # кнопки переноса
+        donor_btns = [self.b_plan, self.b_dry, self.b_run, self.b_loop,
+                      self.b_status, self.b_rollback, self.b_reset,
+                      self.b_manifest, self.b_triggers]
+        for b in donor_btns:
+            try:
+                b.configure(state='disabled' if serv else 'normal')
+            except Exception:
+                pass
+        # кнопки обслуживания — активны всегда, в обслуживании подсвечены
+        # 19.09 (вечер): + чистка триггеров (новая функция)
+        # 21.09: + конверт равкодов
+        for b in (self.b_verify, self.b_cleanup, self.b_repair, self.b_trigclean, self.b_rawconv):
+            try:
+                b.configure(border_width=2 if serv else 0,
+                            border_color="#2d5aa8" if serv else None)
+            except Exception:
+                pass
+        # сохранить режим
+        self.cfg.setdefault('ui', {})['mode'] = 'service' if serv else 'transfer'
+        self._save_cfg()
+        # 19.09: индикатор режима в шапке
+        try:
+            self.head_status.configure(
+                text='РЕЖИМ: ОБСЛУЖИВАНИЕ (только приёмник)' if serv else '',
+                text_color='#b7791f' if serv else None)
+        except Exception:
+            pass
+
+    def _build(self):
+        # --- шапка ---
+        head = ctk.CTkFrame(self, fg_color=("gray80", "gray10"), height=44)
+        head.pack(fill="x")
+        ctk.CTkLabel(head, text="  Утилита переноса объектов",
+                     font=("Segoe UI", 15, "bold")).pack(side="left", padx=8, pady=8)
+        ctk.CTkLabel(head, text="w3x2lni", font=FONT_SMALL).pack(side="left", padx=4)
+        self.head_status = ctk.CTkLabel(head, text="", font=FONT_SMALL)
+        self.head_status.pack(side="right", padx=12)
+
+        self.theme_seg = ctk.CTkSegmentedButton(
+            head, values=["light", "dark"], height=26,
+            command=self._toggle_theme)
+        self.theme_seg.set(APPEARANCE)
+        self.theme_seg.pack(side="right", padx=(0, 12))
+        for ch in self.theme_seg.winfo_children():
+            try:
+                Tooltip(ch, "Светлая или тёмная тема. Выбор сохраняется.")
+            except Exception:
+                pass
+
+        # 19.09 (v7): режим работы — Перенос (донор+приёмник)
+        # или Обслуживание карты (только приёмник)
+        self.mode_seg = ctk.CTkSegmentedButton(
+            head, values=["Перенос", "Обслуживание"], height=26,
+            command=lambda v: self._apply_mode())
+        self.mode_seg.set("Перенос")
+        self.mode_seg.pack(side="right", padx=(0, 16))
+        for ch in self.mode_seg.winfo_children():
+            try:
+                Tooltip(ch, "Перенос — перенос объектов/кода из донора в приёмник.\n"
+                        "Обслуживание — работа с одной картой БЕЗ донора:\n"
+                        "верификация, чистка объектов, починка таблиц.")
+            except Exception:
+                pass
+
+        # --- 1. Карты ---
+        cf, ci = self._card(self, "1. Карты")
+        cf.pack(fill="x", padx=10, pady=(8, 4))
+        self.e_src = self._path_row(ci, "Источник (донор):",
+            "Папка карты-донора в lni-формате (распакованная w3x2lni).\nНапример: G:\\w3x2lni\\UFS10")
+        self.e_tgt = self._path_row(ci, "Приёмник:",
+            "Папка карты, КОТОРУЮ ДОПОЛНЯЕМ.\nСнапшоты изменяемых файлов делаются автоматически.")
+        self.e_name = self._text_row(ci, "Название переноса:",
+            "Подпись для плана и манифеста (например \"UFS герои -> LoW\").")
+
+        # --- середина: этапы слева, настройки справа ---
+        mid = ctk.CTkFrame(self, fg_color="transparent")
+        mid.pack(fill="both", expand=True, padx=10, pady=4)
+
+        # левая колонка: этапы
+        left = ctk.CTkFrame(mid, fg_color=("gray92", "gray14"), corner_radius=8)
+        left.pack(side="left", fill="y", padx=(0, 6), pady=4)
+        ctk.CTkLabel(left, text="2. Этапы", font=("Segoe UI", 12, "bold"),
+                     anchor="w").pack(fill="x", padx=12, pady=(8, 2))
+        self.stage_vars = {}
+        self._stage_cbs = {}
+        for s in STAGES:
+            v = tk.BooleanVar(value=True)
+            cb = ctk.CTkCheckBox(left, text=STAGE_LABELS[s], variable=v,
+                                 font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+            cb.pack(anchor="w", padx=12, pady=1)
+            Tooltip(cb, STAGE_HINTS[s])
+            self.stage_vars[s] = v
+            self._stage_cbs[s] = [cb]
+        self.stage_vars['geometry'].set(False)
+        self.stage_vars['testspawn'].set(False)
+
+        # опции
+        ctk.CTkLabel(left, text="Опции", font=("Segoe UI", 12, "bold"),
+                     anchor="w").pack(fill="x", padx=12, pady=(10, 2))
+        self.v_dry = tk.BooleanVar(value=True)
+        c1 = ctk.CTkCheckBox(left, text="Dry-run (без записи)", variable=self.v_dry,
+                             font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        c1.pack(anchor="w", padx=12, pady=2)
+        Tooltip(c1, "Прогон всего пайплайна без изменения приёмника.\nВсегда запускай сначала это!")
+        self.v_stop = tk.BooleanVar(value=True)
+        c2 = ctk.CTkCheckBox(left, text="Стоп при ошибке", variable=self.v_stop,
+                             font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        c2.pack(anchor="w", padx=12, pady=2)
+        Tooltip(c2, "Останавливает прогон на первом ошибочном этапе.\nОткат: кнопка «Откат» (снапшоты).")
+        self.v_sound = tk.BooleanVar(value=False)
+        c6 = ctk.CTkCheckBox(left, text="Звук по завершении", variable=self.v_sound,
+                             font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        c6.pack(anchor="w", padx=12, pady=2)
+        Tooltip(c6, "Системный звук, когда прогон завершён (удобно для фоновых прогонов).")
+        self.v_autolog = tk.BooleanVar(value=False)
+        c7 = ctk.CTkCheckBox(left, text="Авто-открыть лог после прогона", variable=self.v_autolog,
+                             font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        c7.pack(anchor="w", padx=12, pady=2)
+        Tooltip(c7, "После завершения прогона открыть logs/transfer.log.")
+
+        # правая колонка: настройки (скролл)
+        right = ctk.CTkScrollableFrame(mid, fg_color="transparent")
+        right.pack(side="left", fill="both", expand=True, pady=4)
+
+        # 3. Объекты
+        rf, ri = self._card(right, "3. Объекты")
+        rf.pack(fill="x", pady=4)
+        ctk.CTkLabel(ri, text="Режим переноса объектов:", font=FONT_SMALL,
+                     anchor="w").pack(fill="x")
+        self.mode_var = tk.StringVar(value='smart')
+        hints_mode = {
+            'smart': 'Конфликтный/изменённый стандарт -> новый ID с наследованием от стандарта. Безопасный дефолт.',
+            'replace_std': 'Поля изменённого стандарта ВПИСЫВАЮТСЯ в стандартную секцию приёмника (без нового ID). Как в v6.',
+            'custom_only': 'Переносить только кастомные объекты. Стандартные объекты источника не трогаются.',
+        }
+        for mv, ml in [('smart', 'Умный — новый ID + наследование (рекомендую)'),
+                       ('replace_std', 'Заменять стандарт — поля вписать поверх'),
+                       ('custom_only', 'Только кастомные — стандарт не трогать')]:
+            rb = ctk.CTkRadioButton(ri, text=ml, value=mv, variable=self.mode_var,
+                                    font=FONT_SMALL, radiobutton_width=18, radiobutton_height=18)
+            rb.pack(anchor="w", pady=1)
+            Tooltip(rb, hints_mode[mv])
+        ctk.CTkLabel(ri, text="Корни deps (ID героев/предметов, через запятую):",
+                     font=FONT_SMALL, anchor="w").pack(fill="x", pady=(8, 0))
+        self.e_roots = ctk.CTkEntry(ri, font=FONT_MONO, height=28)
+        self.e_roots.pack(fill="x")
+        Tooltip(self.e_roots, "С чего начинать тянуть зависимости.\nНапример: Hgam, Hpal — герои. Пусто = вся таблица.")
+        self.v_aexp = tk.BooleanVar(value=False)
+        c3 = ctk.CTkCheckBox(ri, text="Авто-расширение deps из кода (дамми и т.д.)",
+                             variable=self.v_aexp, font=FONT_SMALL,
+                             checkbox_width=18, checkbox_height=18)
+        c3.pack(anchor="w", pady=(6, 6))
+        Tooltip(c3, "Вырезка кода находит литералы ID, которых нет в deps\n(дамми-способности и т.п.) и добавляет их в перенос.\nРаботает с кнопкой «Полный цикл».")
+
+        # 4. Таблицы
+        cf2, ci2 = self._card(right, "4. Таблицы")
+        cf2.pack(fill="x", pady=4)
+        ctk.CTkLabel(ci2, text="Переносить таблицы (через запятую):",
+                     font=FONT_SMALL, anchor="w").pack(fill="x")
+        self.e_tables = ctk.CTkEntry(ci2, font=FONT_MONO, height=28)
+        self.e_tables.pack(fill="x")
+        Tooltip(self.e_tables, "unit, ability, buff, item, upgrade, doodad, destructable")
+        ctk.CTkLabel(ci2, text="Пропускать (w3i, misc):",
+                     font=FONT_SMALL, anchor="w").pack(fill="x", pady=(6, 0))
+        self.e_skip = ctk.CTkEntry(ci2, font=FONT_MONO, height=28)
+        self.e_skip.pack(fill="x", pady=(0, 6))
+        Tooltip(self.e_skip, "w3i — настройки карты (слоты, игроки), misc — константы.\nЭти таблицы НЕ переносят (ломают карту).")
+
+        # 5. Импорт ассетов
+        imf, imi = self._card(right, "5. Импорт ассетов")
+        imf.pack(fill="x", pady=4)
+        ctk.CTkLabel(imi, text="НЕ импортировать (по одному в строке, подстрока в пути):",
+                     font=FONT_SMALL, anchor="w").pack(fill="x")
+        self.t_excl = ctk.CTkTextbox(imi, height=90, font=FONT_MONO)
+        self.t_excl.pack(fill="x", pady=(0, 6))
+        Tooltip(self.t_excl, "Ассеты с этими сегментами пути не копируются.\n'UI' = папка UI\\... (или \\UI\\ внутри), не «ui» где угодно.\nДефолт уже защищает миникарту, лоадскрин, скин.\nПример: LoadingScreen, minimap, war3mapMap.blp")
+        # 20.09: перехват игровых моделей (Abilities/Units/ReplaceableTextures)
+        self.v_override = ctk.BooleanVar(value=self.cfg.get('import', {}).get('allow_override', True))
+        cb_ovr = ctk.CTkCheckBox(imi, text="Перехват игровых моделей (Abilities/Units/ReplaceableTextures)",
+                                 variable=self.v_override, font=FONT_SMALL)
+        cb_ovr.pack(anchor="w", pady=(0, 6))
+        Tooltip(cb_ovr, "ВКЛ: файлы по стандартным путям WC3 копируются поверх\nи заменяют модель ГЛОБАЛЬНО для всей карты приёмника.\nВЫКЛ: такие ассеты пропускаются (игровые модели приёмника не трогаются).\nПо умолчанию ВКЛ (как раньше).")
+
+        # 6. Код и геометрия
+        gf2, gi2 = self._card(right, "6. Код и геометрия")
+        gf2.pack(fill="x", pady=(4, 6))
+        # 18.09 (v5): шапка донора — режим переноса
+        ctk.CTkLabel(gi2, text="Шапка донора (code.j):", font=FONT_SMALL,
+                     anchor="w").pack(fill="x")
+        self.header_seg = ctk.CTkSegmentedButton(
+            gi2, values=["отдельный файл", "в шапку приёмника"], height=28,
+            command=lambda v: None)
+        self.header_seg.set("отдельный файл")
+        self.header_seg.pack(fill="x", pady=(2, 4))
+        try:
+            Tooltip(self.header_seg, "Куда положить шапку донора (code.j с хелперами).\n"
+                    "Отдельный файл — 213-FW-header.j перед папками донора (чище).\n"
+                    "В шапку приёмника — дописать в конец твоего code.j с маркерами\n"
+                    "(повторный прогон заменяет блок целиком).")
+        except Exception:
+            pass
+        # 18.09 (v5): префикс функций импорта
+        pfr = ctk.CTkFrame(gi2, fg_color="transparent")
+        pfr.pack(fill="x")
+        self.v_prefix = tk.BooleanVar(value=False)
+        c9 = ctk.CTkCheckBox(pfr, text="Префикс функций импорта:", variable=self.v_prefix,
+                             font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        c9.pack(side="left")
+        Tooltip(c9, "Переименовать функции донора (Sleep -> FW_Sleep).\n"
+                "Закрывает конфликты имён с функциями приёмника.\n"
+                "Не трогает нативы, глобалы udg_*, строки.")
+        self.e_prefix = ctk.CTkEntry(pfr, width=90, height=28, font=FONT_MONO)
+        self.e_prefix.pack(side="left", padx=6)
+        self.e_prefix.insert(0, "FW_")
+        # 19.09 (v6): запись приёмника (deploy_to)
+        dfr = ctk.CTkFrame(gi2, fg_color="transparent")
+        dfr.pack(fill="x")
+        ctk.CTkLabel(dfr, text="Запись приёмника (deploy_to):", font=FONT_SMALL,
+                     anchor="w").pack(side="left")
+        self.e_deploy = ctk.CTkEntry(dfr, width=110, height=28, font=FONT_MONO)
+        self.e_deploy.pack(side="left", padx=6)
+        Tooltip(self.e_deploy, "Имя записи каталога приёмника, куда пишется код\n"
+                "(папка на диске = имя записи 1:1, как 213-FW).\n"
+                "Меняй только для переноса в другую запись!")
+        # 19.09 (v6): галочки каталога и монолита
+        self.v_updcatalog = tk.BooleanVar(value=True)
+        c10 = ctk.CTkCheckBox(gi2, text="Обновлять catalog.lml приёмника", variable=self.v_updcatalog,
+                              font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        c10.pack(anchor="w")
+        Tooltip(c10, "Добавлять записи в catalog.lml приёмника\n(папка FW, шапка). Выключи, если правишь каталог вручную.")
+        self.v_monolith = tk.BooleanVar(value=False)
+        c11 = ctk.CTkCheckBox(gi2, text="Переносить монолит (code-split)", variable=self.v_monolith,
+                              font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        c11.pack(anchor="w")
+        Tooltip(c11, "Переносить code-split монолит донора (крупный код).\nОбычно выключено — монолит переносится отдельно.")
+        # 21.09: null-конверт битых gg_unit (торговцы донора) — ВКЛ по умолчанию
+        self.v_ggnul = tk.BooleanVar(value=True)
+        c12 = ctk.CTkCheckBox(gi2, text="Битые gg_unit → null (юниты вне карты)", variable=self.v_ggnul,
+                              font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        c12.pack(anchor="w")
+        Tooltip(c12, "Ссылки на юнитов, которых нет на карте приёмника\n(торговцы донора) заменяются на null.\nСверка с war3mapUnits.doo приёмника. Выключи, если\nдобавишь юнитов на карту и хочешь живые переменные.")
+        self.v_geom = tk.BooleanVar(value=False)
+        c4 = ctk.CTkCheckBox(gi2, text="Геометрия (декор/юниты — РЕДКО!)", variable=self.v_geom,
+                             font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        c4.pack(anchor="w")
+        Tooltip(c4, "Вставка декора/юнитов в doo приёмника со сдвигом offset.\nВключай только для переноса ландшафта! Повторный прогон задвоит декор.")
+        gfr = ctk.CTkFrame(gi2, fg_color="transparent")
+        gfr.pack(fill="x", padx=12)
+        ctk.CTkLabel(gfr, text="offset dx:", font=FONT_SMALL).pack(side="left")
+        self.e_dx = ctk.CTkEntry(gfr, width=70, height=28, font=FONT_MONO)
+        self.e_dx.pack(side="left", padx=2)
+        ctk.CTkLabel(gfr, text="dy:", font=FONT_SMALL).pack(side="left")
+        self.e_dy = ctk.CTkEntry(gfr, width=70, height=28, font=FONT_MONO)
+        self.e_dy.pack(side="left", padx=4)
+        Tooltip(gfr, "Сдвиг координат декора (dx, dy) при вставке в приёмник.")
+        self.v_allowb = tk.BooleanVar(value=True)
+        c8 = ctk.CTkCheckBox(gi2, text="Заменять B-литералы (баффы) в коде", variable=self.v_allowb,
+                             font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        c8.pack(anchor="w", pady=(4, 0))
+        Tooltip(c8, "Баффы в JASS-коде вызываются равкодами Bxxx.\nПосле переноса баффы получают новые ID — код надо обновить.\nВыключи, если хочешь заменить их вручную позже.")
+        self.v_ts = tk.BooleanVar(value=False)
+        c5 = ctk.CTkCheckBox(gi2, text="TestSpawn (спавн героев в игре)", variable=self.v_ts,
+                             font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        c5.pack(anchor="w", pady=(4, 0))
+        Tooltip(c5, "Генерирует 90-TestSpawn.j: создаёт перенесённых героев для проверки.")
+        ctk.CTkLabel(gi2, text="Герои TestSpawn (пусто = все из deps):",
+                     font=FONT_SMALL, anchor="w").pack(fill="x", pady=(4, 0))
+        self.e_ts = ctk.CTkEntry(gi2, font=FONT_MONO, height=28)
+        self.e_ts.pack(fill="x", pady=(0, 6))
+        # 22.09: точка спавна (center = 0,0 центр карты)
+        ctk.CTkLabel(gi2, text="Точка спавна (center = 0,0 или имя региона):",
+                     font=FONT_SMALL, anchor="w").pack(fill="x")
+        self.e_tsrect = ctk.CTkEntry(gi2, font=FONT_MONO, height=28)
+        self.e_tsrect.pack(fill="x", pady=(0, 6))
+        Tooltip(self.e_tsrect, "center или пусто — спавн в центре карты (0, 0).\nИначе — имя региона (gg_rct_team_1_spawn).")
+
+        # --- кнопки (2 ряда, как в v5) ---
+        btns = ctk.CTkFrame(self, fg_color="transparent")
+        btns.pack(fill="x", padx=10, pady=4)
+        btns2r = ctk.CTkFrame(self, fg_color="transparent")
+        btns2r.pack(fill="x", padx=10, pady=(0, 4))
+
+        def ab(parent, text, cmd, hint_text=None, color=None, w=None):
+            kw = {}
+            if w:
+                kw['width'] = w
+            if color == 'danger':
+                kw['fg_color'] = "#c0392b"
+                kw['hover_color'] = "#96281b"
+            elif color == 'ok':
+                kw['fg_color'] = "#1e8e3e"
+                kw['hover_color'] = "#156a2e"
+            elif color == 'warn':
+                kw['fg_color'] = "#b7791f"
+                kw['hover_color'] = "#9a6a12"
+            # 19.09 (v7-fix): cmd НЕ привязывался — кнопки
+            # были кликабельны визуально, но command=None
+            b = ctk.CTkButton(parent, text=text, height=32, font=FONT_SMALL,
+                              command=cmd, **kw)
+            b.pack(side="left", padx=3)
+            if hint_text:
+                Tooltip(b, hint_text)
+            return b
+
+        ab(btns, "Сохранить конфиг", self._save_cfg,
+           "Записать все настройки в transfer_config.json")
+        self.b_plan = ab(btns, "План", lambda: self._run(['--plan']),
+           "Показать что будет делать прогон (без изменений).")
+        self.b_dry = ab(btns, "Dry-run всего", lambda: self._run(['--dry-run']),
+           "Прогнать ВСЕ этапы без записи. Смотри журнал — что перенесётся.")
+        # 19.09: пересчёт маппинга под текущую пару карт
+        self.b_remap = ab(btns, "Переписать маппинг", lambda: self._run(['--remap']),
+           "Пересчитать реестр занятых ID приёмника и маппинг\nпод ТЕКУЩУЮ пару карт. Запускай после смены\nисточника/приёмника — иначе маппинг останется\nот старой карты (риск коллизий ID).")
+        self.b_run = ab(btns, "ЗАПУСК (запись!)", self._run_all,
+           "Боевой прогон с записью в приёмник. Снапшоты делаются автоматически,\nоткат — кнопка «Откат».", color='danger')
+        self.b_loop = ab(btns, "Полный цикл (повторы)", self._run_loop,
+           "deps->mapping->tables->import->code_cut повторами, пока код находит\nновые дамми (макс 5 итераций). Для переноса героев из монолита.", color='ok')
+        self.b_status = ab(btns, "Статус", lambda: self._run(['--status']),
+           "Какие этапы уже пройдены (state).")
+        self.b_rollback = ab(btns, "Откат", lambda: self._run(['--rollback']),
+           "Восстановить файлы из снапшота последнего этапа.")
+        self.b_reset = ab(btns, "Сброс прогресса", lambda: self._run(['--reset']),
+           "Сбросить список пройденных этапов (state).\nНужен после смены пары карт или для повторного прогона.\nState также сбрасывается АВТОМАТИЧЕСКИ при смене source/target.")
+        self.b_manifest = ab(btns2r, "Манифест", self._manifest,
+           "Отчёт о переносе в mdlog/transfer/ (что перенесено, конфликты ID).")
+        self.b_verify = ab(btns2r, "Верификация", self._verify_only,
+           "Только проверка приёмника БЕЗ переноса: битые ссылки,\nдубли секций, циклы _parent, imp.ini, баланс скобок .j.\nБезопасно — ничего не пишет в карту.")
+        self.b_cleanup = ab(btns2r, "Чистка...", self._cleanup_window,
+           "Чистка карты: неиспользуемые объекты, битые равкоды,\nнеудаляемые способности (по суффиксу/равкоду).\n19.09: расстановка карты (war3map.doo/Units.doo) читается —\nюниты/декорации на карте не удаляются.\nСкан -> список -> подтверждение -> удаление. Никаких молчаливых удалений.")
+        self.b_repair = ab(btns2r, "Починить таблицы", self._repair_main,
+           "Починка таблиц ПРИЁМНИКА (table/*.ini): self-parent,\nбитые _parent, дубли секций, разбаланс [=[ ]=],\n19.09: экранирование строк текста с [ вне блока,\nудаление обрывков описаний.\nПервый клик = скан, второй = починка (бэкап + лог).")
+        self.b_triggers = ab(btns2r, "Триггеры...", self._triggers_window,
+           "Отдельный перенос триггеров: выбрать подпапки\n(героев/системы) и перенести только их.\nЗапись по правилу v4: папки в корень trigger/.")
+        # 19.09: чистка триггеров (отдельное окно)
+        self.b_trigclean = ab(btns2r, "Чистка триггеров...", self._trigclean_window,
+           "Чистка триггеров карты: пустые папки, отключённые/\nзакрытые триггеры, неиспользуемые глобалки,\nмёртвые функции. Скан -> список -> подтверждение -> удаление.")
+        # 21.09: конверт равкодов (разовая операция Обслуживания)
+        self.b_rawconv = ab(btns2r, "Конверт равкодов...", self._rawconv_window,
+           "Разовый конверт 0xXXXXXXXX -> 'RAWC' (base-256) в скрипте карты.\nВход: файл .j или папка карты (ищет map/war3map.j, war3map.j,\ntrigger/code.j). Скан -> конверт (бэкап + лог замен).")
+        # 29.09: деобфускация имён (deob.py, сторонняя разработка юзера)
+        self.b_deob = ab(btns2r, "Деобфускация имён...", self._deob_window,
+           "Переименование обфусцированных идентификаторов (I/J/1, короткие\nВЕРХНИЕ) в читаемые по типам/семантике + восстановление\nформатирования. VERIFY: OK = токен-эквивалентность.\nВыход: <имя>_deobfuscated.j + rename_map.csv (карта переименований).")
+        # 22.09: TestSpawn — генерация 90-TestSpawn.j по галочке/полям TestSpawn
+        self.b_tspawn = ab(btns2r, "TestSpawn .j", lambda: self._run(['--stage', 'testspawn']),
+           "Генерирует 90-TestSpawn.j: спавн перенесённых героев\n(точка из поля «Точка спавна», по умолчанию центр карты 0,0).\nВызов в игре: call ExecuteFunc(\"TestSpawn__I\").")
+        ab(btns2r, "Открыть папку", lambda: os.startfile(HERE))
+
+        # --- статусбар ---
+        # 20.09: паковался ПОСЛЕ журнала (expand) -> выдавливался за край
+        # окна при восстановлении сохранённой геометрии. Pack отдаёт место
+        # в порядке паковки: пакуем ПЕРВЫМ (side bottom) — гарантированно
+        # виден; журнал (expand) получает то, что осталось.
+        sb = ctk.CTkFrame(self, fg_color="transparent")
+        sb.pack(fill="x", side="bottom", padx=10, pady=(0, 6))
+        self.status = ctk.CTkLabel(sb, text="готов", anchor="w",
+                                   font=FONT_SMALL, height=24)
+        self.status.pack(side="left", fill="x", expand=True)
+        self.pct_lbl = ctk.CTkLabel(sb, text="", width=44, anchor="e",
+                                    font=FONT_SMALL)
+        self.pct_lbl.pack(side="left", padx=(6, 0))
+        self.pbar = ctk.CTkProgressBar(sb, height=8)
+        self.pbar.set(0)
+        self.pbar.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        Tooltip(self.pbar, "Прогресс по этапам переноса.\nПолоска заполняется по мере прохождения этапов.")
+
+        # --- прогресс-лента (20.09: до журнала — не выдавливается) ---
+        pf, pi = self._card(self, "Прогресс (state)")
+        pf.pack(fill="x", padx=10, pady=(4, 4))
+        row = ctk.CTkFrame(pi, fg_color="transparent")
+        row.pack(fill="x")
+        btns2 = ctk.CTkFrame(row, fg_color="transparent")
+        btns2.pack(side="right")
+        ctk.CTkButton(btns2, text="Обновить", width=80, height=26,
+                      command=self._refresh_progress).pack(side="left", padx=1)
+        ctk.CTkButton(btns2, text="Сброс", width=60, height=26,
+                      command=lambda: self._run(['--reset'])).pack(side="left", padx=1)
+        ctk.CTkButton(btns2, text="Журнал", width=70, height=26,
+                      command=self._open_log).pack(side="left", padx=1)
+        ctk.CTkButton(btns2, text="Манифест", width=80, height=26,
+                      command=self._open_manifest).pack(side="left", padx=1)
+        self.prog_labels = {}
+        for s in STAGES:
+            lbl = ctk.CTkLabel(row, text=" " + SHORT.get(s, STAGE_LABELS[s]) + " ",
+                               font=("Segoe UI", 10), corner_radius=6,
+                               fg_color=("gray85", "gray20"),
+                               text_color=("gray40", "gray60"))
+            lbl.pack(side="left", padx=1)
+            self.prog_labels[s] = lbl
+        Tooltip(pf, "Прогресс привязан к паре карт: смена источника/приёмника\nавтоматически сбрасывает список пройденных этапов.\nНесколько конфигов = независимые прогоны (свой state у каждого).")
+
+        # --- журнал ---
+        lf, li = self._card(self, "Журнал")
+        lf.pack(fill="both", expand=True, padx=10, pady=4)
+        lbar = ctk.CTkFrame(li, fg_color="transparent")
+        lbar.pack(fill="x")
+        ctk.CTkLabel(lbar, text="Поиск:", font=FONT_SMALL).pack(side="left", padx=(0, 2))
+        self.e_find = ctk.CTkEntry(lbar, width=220, height=26, font=FONT_SMALL)
+        self.e_find.pack(side="left")
+        Tooltip(self.e_find, "Подсветить строки журнала (Enter). Esc — сброс.")
+        self.e_find.bind("<Return>", self._log_find)
+        self.e_find.bind("<Escape>", lambda e: self._log_find_clear())
+        ctk.CTkButton(lbar, text="Очистить", width=80, height=26,
+                      command=lambda: self.log.delete("1.0", "end")).pack(side="left", padx=4)
+        ctk.CTkButton(lbar, text="Копировать всё", width=110, height=26,
+                      command=self._log_copy).pack(side="left", padx=2)
+        ctk.CTkButton(lbar, text="А-", width=30, height=26,
+                      command=lambda: self._log_font(-1)).pack(side="left", padx=(8, 1))
+        ctk.CTkButton(lbar, text="А+", width=30, height=26,
+                      command=lambda: self._log_font(1)).pack(side="left", padx=1)
+
+        log_wrap = ctk.CTkFrame(li, fg_color="transparent")
+        log_wrap.pack(fill="both", expand=True)
+        dark = APPEARANCE == 'dark'
+        self.log = tk.Text(log_wrap, height=9, wrap="word", font=FONT_MONO,
+                           borderwidth=0, relief="flat",
+                           bg="#12151a" if dark else "#1e1e1e",
+                           fg="#c8d0da" if dark else "#d4d4d4",
+                           insertbackground="#e8edf4" if dark else "#ffffff",
+                           selectbackground="#2d5aa8", selectforeground="#ffffff")
+        log_sb = ctk.CTkScrollbar(log_wrap, command=self.log.yview)
+        self.log.configure(yscrollcommand=log_sb.set)
+        log_sb.pack(side="right", fill="y")
+        self.log.pack(side="left", fill="both", expand=True)
+        self.log.tag_configure("err", foreground="#ff6b6b")
+        self.log.tag_configure("ok", foreground="#7ee787")
+        self.log.tag_configure("warn", foreground="#e6a23c")
+        self.log.tag_configure("found", background="#5a5a2e")
+
+        # --- прогресс-лента ---
+        # 20.09: старые статусбар и прогресс-лента отсюда УДАЛЕНЫ —
+        # переехали выше (до журнала), см. «статусбар» и «прогресс-лента».
+
+    # --- строки ввода с кнопкой выбора папки ---
+
+    def _path_row(self, parent, label, hint_text):
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", pady=3)
+        ctk.CTkLabel(row, text=label, width=150, anchor="w",
+                     font=FONT_SMALL).pack(side="left")
+        e = ctk.CTkEntry(row, font=FONT_MONO, height=30)
+        e.pack(side="left", fill="x", expand=True, padx=6)
+        if hint_text:
+            Tooltip(e, hint_text)
+        ctk.CTkButton(row, text="...", width=36, height=30,
+                      command=lambda: self._pick(e)).pack(side="left")
+        return e
+
+    def _text_row(self, parent, label, hint_text):
+        row = ctk.CTkFrame(parent, fg_color="transparent")
+        row.pack(fill="x", pady=3)
+        ctk.CTkLabel(row, text=label, width=150, anchor="w",
+                     font=FONT_SMALL).pack(side="left")
+        e = ctk.CTkEntry(row, font=FONT_MONO, height=30)
+        e.pack(side="left", fill="x", expand=True, padx=6)
+        if hint_text:
+            Tooltip(e, hint_text)
+        return e
+
+    # ---------- тема ----------
+
+    def _toggle_theme(self, value):
+        global APPEARANCE
+        APPEARANCE = value
+        ctk.set_appearance_mode(value)
+        self.cfg.setdefault('gui', {})['theme'] = value
+        try:
+            io.open(CFG, 'wb').write(json.dumps(self.cfg, indent=2, ensure_ascii=False).encode('utf-8'))
+        except Exception:
+            pass
+        self._apply_log_theme()
+
+    def _apply_log_theme(self):
+        dark = ctk.get_appearance_mode().lower() == 'dark'
+        self.log.configure(
+            bg="#12151a" if dark else "#1e1e1e",
+            fg="#c8d0da" if dark else "#d4d4d4",
+            insertbackground="#e8edf4" if dark else "#ffffff")
+
+    # ---------- прогресс ----------
+
+    def _refresh_progress(self):
+        try:
+            sp = os.path.join(HERE, 'transfer_state.json')
+            done = set()
+            if os.path.exists(sp):
+                st = json.load(io.open(sp, 'rb'))
+                pair = (self.e_src.get().strip() + '->' + self.e_tgt.get().strip())
+                if st.get('pair') == pair:
+                    done = set(st.get('completed', []))
+            dark = ctk.get_appearance_mode().lower() == 'dark'
+            for s, lbl in self.prog_labels.items():
+                if s in done:
+                    lbl.configure(fg_color="#1d3a28" if dark else "#d9f0e2",
+                                  text_color="#7ee787" if dark else "#14663a")
+                else:
+                    lbl.configure(fg_color="gray20" if dark else "gray85",
+                                  text_color="gray60" if dark else "gray40")
+        except Exception:
+            pass
+
+    # ---------- журнал ----------
+
+    def _log_find(self, event=None):
+        self._log_find_clear()
+        q = self.e_find.get().strip().lower()
+        if not q:
+            return
+        idx = self.log.index('1.0')
+        while True:
+            pos = self.log.search(q, idx, stopindex='end', nocase=True)
+            if not pos:
+                break
+            end = '%s+%dc' % (pos, len(q))
+            self.log.tag_add('found', pos, end)
+            idx = end
+        self.log.see('1.0')
+
+    def _log_find_clear(self):
+        self.log.tag_remove('found', '1.0', 'end')
+
+    def _log_copy(self):
+        txt = self.log.get('1.0', 'end').strip()
+        self.clipboard_clear()
+        self.clipboard_append(txt)
+        self.status.configure(text='журнал скопирован в буфер (%d символов)' % len(txt))
+
+    def _log_font(self, delta):
+        self.log_size = max(7, min(16, self.log_size + delta))
+        self.log.configure(font=('Consolas', self.log_size))
+
+    def _open_log(self):
+        p = os.path.join(HERE, 'logs', 'transfer.log')
+        if os.path.exists(p):
+            os.startfile(p)
+        else:
+            messagebox.showinfo('Журнал', 'Журнала пока нет — запусти прогон.')
+
+    def _open_manifest(self):
+        import glob as _g
+        d = os.path.join(HERE, 'logs')
+        fs = sorted(_g.glob(os.path.join(d, 'transfer-manifest-*.md')))
+        if fs:
+            os.startfile(fs[-1])
+        else:
+            messagebox.showinfo('Манифест', 'Манифестов пока нет — запусти перенос.')
+
+    # ---------- логика (1-в-1 со старым GUI) ----------
+
+    def _pick(self, entry):
+        d = filedialog.askdirectory()
+        if d:
+            entry.delete(0, 'end')
+            entry.insert(0, d)
+
+    def _log(self, msg, tag=None, scope=None):
+        # 19.09 (вечер): scope='transfer' — сообщения переноса;
+        # в режиме Обслуживание они НЕ показываются в журнале
+        self.q.put((msg, tag, scope))
+
+    def _poll_log(self):
+        while not self.q.empty():
+            item = self.q.get()
+            # 19.09 (вечер): очередь (msg, tag, scope) —
+            # старые 2-элементные записи совместимы
+            if len(item) == 3:
+                msg, tag, scope = item
+            else:
+                msg, tag = item
+                scope = None
+            if msg == '__done__':
+                self.running = False
+                self.status.configure(text='готов')
+                self.head_status.configure(text='готов')
+                # 20.09: прогресс-бар — завершение
+                self.pbar.set(1)
+                self.pct_lbl.configure(text='100%')
+                self.after(2500, lambda: (self.pbar.set(0), self.pct_lbl.configure(text='')))
+                self._refresh_progress()
+                if self.v_sound.get():
+                    try:
+                        import winsound
+                        winsound.MessageBeep(winsound.MB_OK)
+                    except Exception:
+                        pass
+                if self.v_autolog.get():
+                    try:
+                        self._open_log()
+                    except Exception:
+                        pass
+                continue
+            # 19.09 (вечер): фильтр по режиму —
+            # transfer-сообщения не показываются
+            # в режиме Обслуживание
+            if scope == 'transfer':
+                try:
+                    if self.mode_seg.get() == 'Обслуживание':
+                        continue
+                except Exception:
+                    pass
+            # 20.09: прогресс-бар — парсинг строк этапов
+            # '=== ЭТАПЫ: N' — общее число; 'ЭТАП X: запуск' — старт очередного
+            try:
+                if msg.startswith('=== ЭТАПЫ:'):
+                    self._pb_total = int(msg.split(':')[1].strip())
+                    self._pb_done = 0
+                    self.pbar.set(0)
+                    self.pct_lbl.configure(text='0%')
+                elif 'ЭТАП ' in msg and ': запуск' in msg:
+                    if getattr(self, '_pb_total', 0):
+                        self._pb_done += 1
+                        frac = min(self._pb_done, self._pb_total) / self._pb_total
+                        self.pbar.set(frac)
+                        self.pct_lbl.configure(text='%d%%' % round(frac * 100))
+            except Exception:
+                pass
+            self.log.insert('end', msg + '\n', tag or ())
+            self.log.see('end')
+        self.after(100, self._poll_log)
+
+    def _collect_cfg(self):
+        cfg = self.cfg
+        cfg['source'] = self.e_src.get().strip()
+        cfg['target'] = self.e_tgt.get().strip()
+        cfg['name'] = self.e_name.get().strip()
+        cfg['tables'] = [t.strip() for t in self.e_tables.get().split(',') if t.strip()]
+        cfg['skip_tables'] = [t.strip() for t in self.e_skip.get().split(',') if t.strip()]
+        cfg.setdefault('deps', {})['roots'] = [t.strip() for t in self.e_roots.get().split(',') if t.strip()]
+        cfg.setdefault('mapping', {})['mode'] = self.mode_var.get()
+        cfg['geometry']['enabled'] = self.v_geom.get()
+        try:
+            dx = float(self.e_dx.get() or 0)
+            dy = float(self.e_dy.get() or 0)
+        except ValueError:
+            dx = dy = 0.0
+        cfg['geometry']['offset'] = [dx, dy] if (dx or dy) else None
+        cfg['testspawn']['enabled'] = self.v_ts.get()
+        cfg['testspawn']['heroes'] = [t.strip() for t in self.e_ts.get().split(',') if t.strip()]
+        # 22.09: точка спавна — 'center' (0,0) или имя региона; конфиг↔UI вместе
+        cfg['testspawn']['rect'] = self.e_tsrect.get().strip() or 'center'
+        cfg['import']['exclude_paths'] = [l.strip() for l in self.t_excl.get('1.0', 'end').splitlines() if l.strip()]
+        # 20.09: перехват игровых моделей — конфиг↔UI вместе
+        cfg['import']['allow_override'] = self.v_override.get()
+        cfg.setdefault('code_cut', {})['auto_expand'] = self.v_aexp.get()
+        cfg['safety']['stop_on_error'] = self.v_stop.get()
+        cfg.setdefault('code', {})['allow_b'] = self.v_allowb.get()
+        # 18.09 (v5): шапка донора + префикс функций
+        cfg['code']['header_mode'] = 'append' if self.header_seg.get() == 'в шапку приёмника' else 'file'
+        cfg['code']['func_prefix'] = self.e_prefix.get().strip() if self.v_prefix.get() else ''
+        # 19.09 (v6): deploy_to + каталог + монолит
+        dep = self.e_deploy.get().strip()
+        if dep:
+            cfg['code']['deploy_to'] = dep
+        cfg['code']['update_catalog'] = True if self.v_updcatalog.get() else None
+        cfg['code']['include_monolith'] = self.v_monolith.get()
+        # 21.09: null-конверт битых gg_unit — конфиг↔UI вместе
+        cfg.setdefault('code', {})['null_broken_gguits'] = self.v_ggnul.get()
+        cfg.setdefault('gui', {})['sound_on_done'] = self.v_sound.get()
+        cfg['gui']['autolog'] = self.v_autolog.get()
+        cfg['gui']['log_font'] = self.log_size
+        cfg['gui']['theme'] = APPEARANCE
+        try:
+            cfg['gui']['geometry'] = self.geometry()
+        except Exception:
+            pass
+        se = cfg.setdefault('stage_enabled', {})
+        for s in STAGES:
+            se[s] = self.stage_vars[s].get()
+        return cfg
+
+    def _save_cfg(self):
+        self._collect_cfg()
+        io.open(CFG, 'wb').write(json.dumps(self.cfg, indent=2, ensure_ascii=False).encode('utf-8'))
+        # 19.09 (вечер): убран _log — «конфиг сохранён» замусоривал
+        # журнал при каждом действии (5+ раз за прогон)
+
+    def _load_cfg(self):
+        if not os.path.exists(CFG):
+            return
+        self.cfg = json.load(io.open(CFG, 'rb'))
+        self.e_src.delete(0, 'end'); self.e_src.insert(0, self.cfg.get('source', ''))
+        self.e_tgt.delete(0, 'end'); self.e_tgt.insert(0, self.cfg.get('target', ''))
+        self.e_name.delete(0, 'end'); self.e_name.insert(0, self.cfg.get('name', ''))
+        self.e_tables.delete(0, 'end'); self.e_tables.insert(0, ', '.join(self.cfg.get('tables', [])))
+        self.e_skip.delete(0, 'end'); self.e_skip.insert(0, ', '.join(self.cfg.get('skip_tables', [])))
+        self.e_roots.delete(0, 'end'); self.e_roots.insert(0, ', '.join(self.cfg.get('deps', {}).get('roots', [])))
+        self.mode_var.set(self.cfg.get('mapping', {}).get('mode', 'smart'))
+        self.v_geom.set(self.cfg.get('geometry', {}).get('enabled', False))
+        off = self.cfg.get('geometry', {}).get('offset') or [0, 0]
+        self.e_dx.delete(0, 'end'); self.e_dx.insert(0, str(off[0]))
+        self.e_dy.delete(0, 'end'); self.e_dy.insert(0, str(off[1]))
+        self.v_ts.set(self.cfg.get('testspawn', {}).get('enabled', False))
+        self.e_ts.delete(0, 'end'); self.e_ts.insert(0, ', '.join(self.cfg.get('testspawn', {}).get('heroes', [])))
+        # 22.09: точка спавна — восстановление из конфига
+        self.e_tsrect.delete(0, 'end')
+        self.e_tsrect.insert(0, self.cfg.get('testspawn', {}).get('rect', 'center'))
+        self.v_aexp.set(self.cfg.get('code_cut', {}).get('auto_expand', False))
+        self.v_allowb.set(self.cfg.get('code', {}).get('allow_b', True))
+        # 18.09 (v5): шапка донора + префикс
+        hm = self.cfg.get('code', {}).get('header_mode', 'file')
+        self.header_seg.set('в шапку приёмника' if hm == 'append' else 'отдельный файл')
+        fp = self.cfg.get('code', {}).get('func_prefix', '')
+        self.v_prefix.set(bool(fp))
+        if fp:
+            self.e_prefix.delete(0, 'end')
+            self.e_prefix.insert(0, fp)
+        # 19.09 (v6): deploy_to + каталог + монолит
+        self.e_deploy.delete(0, 'end')
+        self.e_deploy.insert(0, self.cfg.get('code', {}).get('deploy_to', ''))
+        uc = self.cfg.get('code', {}).get('update_catalog')
+        self.v_updcatalog.set(True if uc is None else bool(uc))
+        self.v_monolith.set(self.cfg.get('code', {}).get('include_monolith', False))
+        # 21.09: null-конверт битых gg_unit — восстановление из конфига
+        self.v_ggnul.set(self.cfg.get('code', {}).get('null_broken_gguits', True))
+        self.t_excl.delete('1.0', 'end')
+        self.t_excl.insert('1.0', chr(10).join(self.cfg.get('import', {}).get('exclude_paths', [])))
+        # 20.09: перехват игровых моделей — восстановление из конфига
+        self.v_override.set(self.cfg.get('import', {}).get('allow_override', True))
+        g = self.cfg.get('gui', {})
+        self.v_sound.set(g.get('sound_on_done', False))
+        self.v_autolog.set(g.get('autolog', False))
+        self.log_size = g.get('log_font', 9)
+        self.log.configure(font=('Consolas', self.log_size))
+        geo = g.get('geometry')
+        if geo:
+            try:
+                # 19.09 (v7-fix): игнорировать дефолт CTk
+                # 200x200 (окно закрыли до рендера) — иначе
+                # замкнутый круг: 200x200 сохраняется и
+                # восстанавливается, контент не влезает
+                m = re.match(r'^(\d+)x(\d+)', geo)
+                if m and int(m.group(1)) > 400 and int(m.group(2)) > 400:
+                    self.geometry(geo)
+            except Exception:
+                pass
+        self._refresh_progress()
+
+    def _cfg_path(self):
+        return CFG
+
+    def _log_add(self, msg):
+        self._log(msg)
+
+    def _run_all(self):
+        self._save_cfg()
+        args = ['--all'] if not self.v_dry.get() else ['--dry-run']
+        self._run(args)
+
+    def _run_loop(self):
+        self._save_cfg()
+        self._run(['--loop'])
+
+    def _verify_only(self):
+        if self.running:
+            messagebox.showwarning('Занято', 'Прогон уже выполняется — дождись завершения.')
+            return
+        self._collect_cfg()
+        io.open(CFG, 'wb').write(json.dumps(self.cfg, indent=2, ensure_ascii=False).encode('utf-8'))
+        cmd = [sys.executable, '-u', os.path.join(HERE, 'stage_verify.py'), CFG]
+        # 19.09: в режиме Обслуживания — без маппинга
+        # (маппинг от чужого переноса даёт ложные
+        # «нет секций в приёмнике»)
+        if self.mode_seg.get() == 'Обслуживание':
+            cmd.append('--no-map')
+        self._log('>>> Верификация приёмника (без переноса)', 'ok')
+        self.running = True
+        self.status.configure(text='верификация...')
+        threading.Thread(target=self._worker, args=(cmd,), daemon=True).start()
+
+    def _manifest(self):
+        self._save_cfg()
+        cmd = [sys.executable, os.path.join(HERE, 'make_manifest.py'), CFG]
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', cwd=HERE)
+        self._log(((r.stdout or '') + (r.stderr or '')).strip())
+
+    def _worker(self, cmd, scope=None):
+        try:
+            cmds = cmd if cmd and isinstance(cmd[0], list) else [cmd]
+            for c in cmds:
+                self._worker_one(c, scope)
+        except Exception as e:
+            self.q.put(('ОШИБКА ЗАПУСКА: %s' % e, 'err', None))
+        finally:
+            self.running = False
+            self.q.put(('__done__', None, None))
+
+    def _worker_one(self, cmd, scope=None):
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, encoding='utf-8', errors='replace',
+                                    cwd=HERE, bufsize=1)
+            for line in proc.stdout:
+                line = line.rstrip()
+                if not line:
+                    continue
+                low = line.lower()
+                tag = None
+                if 'ошибка' in low or 'error' in low or 'код 1' in low:
+                    tag = 'err'
+                elif 'внимание' in low or 'warning' in low:
+                    tag = 'warn'
+                self.q.put((line, tag, scope))
+            proc.wait()
+            self.q.put(('--- код выхода: %d ---' % proc.returncode,
+                        'ok' if proc.returncode == 0 else 'err', scope))
+        except Exception as e:
+            # 19.09 (вечер): 3-элементная очередь
+            self.q.put(('ОШИБКА ЗАПУСКА: %s' % e, 'err', None))
+
+    def _run(self, args):
+        if self.running:
+            messagebox.showwarning('Занято', 'Прогон уже выполняется — дождись завершения.')
+            return
+        self._collect_cfg()
+        io.open(CFG, 'wb').write(json.dumps(self.cfg, indent=2, ensure_ascii=False).encode('utf-8'))
+        if args and isinstance(args[0], list):
+            cmds = [[sys.executable, '-u', os.path.join(HERE, 'transfer_run.py')] + a for a in args]
+            desc = ' -> '.join(' '.join(a) for a in args)
+        else:
+            cmds = [[sys.executable, '-u', os.path.join(HERE, 'transfer_run.py')] + args]
+            desc = ' '.join(args)
+        # 19.09 (вечер): service-команды (обслуживание) не фильтруются
+        # в журнале; transfer-этапы скрыты в режиме Обслуживание
+        flat = ' '.join(desc)
+        scope = 'transfer'
+        for svc in ('--verify', '--cleanup', '--repair', '--triggers', '--status',
+                    '--rollback', '--reset'):
+            if svc in flat:
+                scope = None
+                break
+        self._log('>>> ' + desc, 'ok', scope)
+        self.running = True
+        # 20.09: прогресс-бар — сброс на старте прогона
+        self._pb_total = 0
+        self._pb_done = 0
+        self.pbar.set(0)
+        self.pct_lbl.configure(text='')
+        self.status.configure(text='выполняется: ' + desc)
+        self.head_status.configure(text='выполняется...')
+        threading.Thread(target=self._worker, args=(cmds, scope), daemon=True).start()
+
+    # ---------- окно триггеров ----------
+
+    def _trigclean_window(self):
+        """19.09: чистка триггеров — пустые папки,
+        отключённые/закрытые триггеры, глобалки,
+        мёртвые функции. Скан -> список -> подтверждение."""
+        win = ctk.CTkToplevel(self)
+        win.title('Чистка триггеров')
+        # 29.09: авто-подгонка под контент (вместо жёсткой 980x700)
+        def _front():
+            try:
+                win.lift()
+                win.focus_force()
+            except Exception:
+                pass
+        win.after(200, _front)
+
+        top, ti = self._card(win, 'Карта')
+        top.pack(fill='x', padx=8, pady=6)
+        row = ctk.CTkFrame(ti, fg_color="transparent")
+        row.pack(fill="x")
+        ctk.CTkLabel(row, text='Папка карты:', font=FONT_SMALL).pack(side='left')
+        e_dir = ctk.CTkEntry(row, font=FONT_MONO, height=30)
+        e_dir.pack(side='left', fill='x', expand=True, padx=6)
+        last_dir = self.cfg.get('cleanup', {}).get('last_dir', '')
+        e_dir.insert(0, last_dir if last_dir else self.e_tgt.get().strip())
+        Tooltip(e_dir, 'Папка карты в lni-формате (trigger/ + catalog.lml).')
+        ctk.CTkButton(row, text='...', width=36, height=30,
+                      command=lambda: self._cleanup_pick(e_dir)).pack(side='left')
+
+        opts, oi = self._card(win, 'Что чистим')
+        opts.pack(fill='x', padx=8, pady=4)
+        # 19.09 (вечер): галочки из конфига (persist cfg['trigclean'])
+        tc = self.cfg.get('trigclean', {})
+        v_dirs = tk.BooleanVar(value=tc.get('empty_dirs', True))
+        v_txt = tk.BooleanVar(value=tc.get('del_empty_txt', True))
+        v_dis = tk.BooleanVar(value=tc.get('disabled', True))
+        v_clo = tk.BooleanVar(value=tc.get('closed', False))
+        v_notes = tk.BooleanVar(value=tc.get('del_notes', False))
+        v_glob = tk.BooleanVar(value=tc.get('globals', False))
+        v_func = tk.BooleanVar(value=tc.get('dead_funcs', False))
+        v_casc = tk.BooleanVar(value=tc.get('cascade', True))
+        v_codej = tk.BooleanVar(value=tc.get('include_codej', False))
+        v_com = tk.BooleanVar(value=tc.get('comments', False))
+        r2b = ctk.CTkFrame(opts, fg_color="transparent"); r2b.pack(fill='x', pady=1)
+        cb10 = ctk.CTkCheckBox(r2b, text='Comment-заглушки (разделители, заметки без кода)', variable=v_com,
+                               font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        cb10.pack(side='left')
+        Tooltip(cb10, 'Триггеры с флагом Comment БЕЗ .j-кода: разделители\n«--------», заметки-файлы. Триггеры с .j-кодом НЕ трогаются.\nПапки, освободившиеся после удаления, сносятся тем же прогоном.')
+        # 19.09 (вечер): исключения — папки, которые не трогать
+        er = ctk.CTkFrame(opts, fg_color="transparent"); er.pack(fill='x', pady=1)
+        ctk.CTkLabel(er, text='Исключения (папки через запятую):', font=FONT_SMALL).pack(side='left')
+        e_excl = ctk.CTkEntry(er, font=FONT_MONO, height=28)
+        e_excl.pack(side='left', fill='x', expand=True, padx=(6, 0))
+        excl_cfg = self.cfg.get('cleanup', {}).get('exclude_dirs', [])
+        e_excl.insert(0, ', '.join(excl_cfg))
+        Tooltip(e_excl, 'Имена папок (на любом уровне trigger/), которые\nНЕ трогать: ни папки, ни триггеры, ни функции.\nСохраняется в конфиг (cleanup.exclude_dirs).')
+        r1 = ctk.CTkFrame(opts, fg_color="transparent"); r1.pack(fill='x', pady=1)
+        cb = ctk.CTkCheckBox(r1, text='Пустые папки', variable=v_dirs, font=FONT_SMALL,
+                             checkbox_width=18, checkbox_height=18); cb.pack(side='left')
+        Tooltip(cb, 'Папки без файлов и с только пустыми подпапками (рекурсивно).\nЗаписи о них убираются из catalog.lml.')
+        cb2 = ctk.CTkCheckBox(r1, text='удалять пустые .txt-заметки (0 байт)', variable=v_txt,
+                              font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        cb2.pack(side='left', padx=(16, 0))
+        Tooltip(cb2, 'Только ПОЛНОСТЬЮ пустые .txt. Заметки с текстом не трогаются.')
+        r2 = ctk.CTkFrame(opts, fg_color="transparent"); r2.pack(fill='x', pady=1)
+        cb3 = ctk.CTkCheckBox(r2, text='Отключённые триггеры (Disab)', variable=v_dis, font=FONT_SMALL,
+                              checkbox_width=18, checkbox_height=18); cb3.pack(side='left')
+        Tooltip(cb3, 'Триггеры с флагом Disab в catalog.lml.\nТриггер, чьи функции вызываются из живого кода, НЕ удаляется (защита).')
+        cb4 = ctk.CTkCheckBox(r2, text='Закрытые (Closed) — ОСТОРОЖНО!', variable=v_clo, font=FONT_SMALL,
+                              checkbox_width=18, checkbox_height=18)
+        cb4.pack(side='left', padx=(16, 0))
+        Tooltip(cb4, 'ОПАСНО: Closed = «закрыт» в редакторе, НЕ «мёртвый»!\nВ этой карте Closed помечены ЖИВЫЕ триггеры\n(MoveRight, CodeBot и др.). Включай только если\nточно знаешь, что закрытые триггеры не нужны.')
+        cb5 = ctk.CTkCheckBox(r2, text='удалять их заметки (.txt с текстом)', variable=v_notes,
+                              font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        cb5.pack(side='left', padx=(16, 0))
+        Tooltip(cb5, 'По умолчанию заметки отключённых триггеров остаются.')
+        r3 = ctk.CTkFrame(opts, fg_color="transparent"); r3.pack(fill='x', pady=1)
+        cb6 = ctk.CTkCheckBox(r3, text='Неиспользуемые глобалки (variable.lml)', variable=v_glob,
+                              font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        cb6.pack(side='left')
+        Tooltip(cb6, 'Переменные редактора без упоминаний udg_Имя в коде.\nvJass-глобалы внутри библиотек не трогаются.')
+        r4 = ctk.CTkFrame(opts, fg_color="transparent"); r4.pack(fill='x', pady=1)
+        cb7 = ctk.CTkCheckBox(r4, text='Мёртвые функции (trigger/ + корневые .j)', variable=v_func,
+                              font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        cb7.pack(side='left')
+        Tooltip(cb7, 'Функции без вызовов (включая ExecuteFunc-строки).\nmap/war3map.j (скомпилированный) не трогается.')
+        cb8 = ctk.CTkCheckBox(r4, text='каскад', variable=v_casc, font=FONT_SMALL,
+                              checkbox_width=18, checkbox_height=18)
+        cb8.pack(side='left', padx=(16, 0))
+        Tooltip(cb8, 'Функция, вызываемая только из мёртвых, тоже мёртвая.')
+        cb9 = ctk.CTkCheckBox(r4, text='включая code.j (кастом-код)', variable=v_codej,
+                              font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        cb9.pack(side='left', padx=(16, 0))
+        Tooltip(cb9, 'По умолчанию code.j только как источник вызовов,\nсам не чистится.')
+
+        lst, li = self._card(win, 'Скан (выдели строки и подтверди удаление)')
+        lst.pack(fill='both', expand=True, padx=8, pady=4)
+        dark = APPEARANCE == 'dark'
+        style = ttk.Style(win)
+        style.configure('TrigClean.Treeview', background="#181b21" if dark else "#ffffff",
+                        fieldbackground="#181b21" if dark else "#ffffff",
+                        foreground="#e8edf4" if dark else "#1a1a1a",
+                        font=('Segoe UI', 10), rowheight=24, borderwidth=0)
+        style.map('TrigClean.Treeview', background=[('selected', '#2d5aa8')],
+                  foreground=[('selected', '#ffffff')])
+        style.configure('TrigClean.Treeview.Heading', font=('Segoe UI', 10, 'bold'),
+                        background="#262b33" if dark else "#e3e8ef",
+                        foreground="#e8edf4" if dark else "#1a1a1a", padding=(6, 4))
+        tree = ttk.Treeview(li, columns=('cat', 'name', 'size', 'why'), show='headings', height=13,
+                            selectmode='extended', style='TrigClean.Treeview')
+        tree.heading('cat', text='Категория')
+        tree.heading('name', text='Имя')
+        tree.heading('size', text='Размер')
+        tree.heading('why', text='Причина')
+        tree.column('cat', width=170)
+        tree.column('name', width=280)
+        tree.column('size', width=70, anchor='e')
+        tree.column('why', width=330)
+        tree.pack(side='left', fill='both', expand=True, padx=4, pady=4)
+        sb = ctk.CTkScrollbar(li, command=tree.yview)
+        sb.pack(side='left', fill='y')
+        tree.configure(yscrollcommand=sb.set)
+        tree.bind('<Control-a>', lambda e: (tree.selection_set(tree.get_children()), 'break')[1])
+        tree.bind('<Control-A>', lambda e: (tree.selection_set(tree.get_children()), 'break')[1])
+
+        btns = ctk.CTkFrame(win, fg_color="transparent")
+        btns.pack(fill='x', padx=8, pady=(4, 2))
+        btns2 = ctk.CTkFrame(win, fg_color="transparent")
+        btns2.pack(fill='x', padx=8, pady=(0, 2))
+        lbl = ctk.CTkLabel(btns2, text='', font=FONT_SMALL)
+        lbl.pack(side='left', padx=6)
+        self._trigclean_state = {'tree': tree, 'win': win, 'lbl': lbl, 'scan': None}
+
+        b_scan = ctk.CTkButton(btns, text='1. СКАН', height=36, font=("Segoe UI", 12, "bold"),
+                               command=lambda: self._trigclean_scan(e_dir, win, lbl,
+                                   v_dirs, v_txt, v_dis, v_clo, v_notes, v_glob, v_func, v_casc, v_codej, v_com, e_excl))
+        b_scan.pack(side='left', padx=(6, 10), pady=2)
+        Tooltip(b_scan, 'ШАГ 1. Искать мусор (~1-3 мин на большую карту).\nРезультат появится в списке.')
+        b_del = ctk.CTkButton(btns, text='2. УДАЛИТЬ ВЫДЕЛЕННОЕ', height=36,
+                              font=("Segoe UI", 12, "bold"),
+                              fg_color="#1e8e3e", hover_color="#156a2e",
+                              command=lambda: self._trigclean_delete(e_dir, lbl))
+        b_del.pack(side='left', padx=3, pady=2)
+        Tooltip(b_del, 'ШАГ 2. Удалить отмеченные строки.\nПодтверждение + бэкап (включая catalog.lml и variable.lml).')
+        # 19.09 (вечер): ДЕМО — что будет удалено, без записи
+        b_demo = ctk.CTkButton(btns, text='ДЕМО (без записи)', height=36,
+                               font=("Segoe UI", 11),
+                               fg_color="#b7791f", hover_color="#8a5a13",
+                               command=lambda: self._trigclean_delete(e_dir, lbl, dry=True))
+        b_demo.pack(side='left', padx=3, pady=2)
+        Tooltip(b_demo, 'ПОКАЗАТЬ что будет удалено — БЕЗ записи в карту\nи без бэкапа. Пишет лог (logs/triggers-дата-demo.md)\nи открывает его. Безопасно.')
+        ctk.CTkButton(btns2, text='Выделить всё', height=30,
+                      command=lambda: tree.selection_set(tree.get_children())).pack(side='left', padx=(6, 3), pady=2)
+        ctk.CTkButton(btns2, text='Открыть лог', height=30,
+                      command=self._cleanup_open_log).pack(side='left', padx=3)
+        # 19.09: защитный список (cleanup_protect.json) — галочка
+        v_prot = ctk.BooleanVar(value=self.cfg.get('cleanup', {}).get('protect', True))
+        cb_prot = ctk.CTkCheckBox(btns2, text='Защитный список', variable=v_prot,
+                                  font=FONT_SMALL, height=28)
+        cb_prot.pack(side='left', padx=(10, 3), pady=2)
+        Tooltip(cb_prot, 'НЕ помечать неиспользуемыми объекты из внешнего списка\\ncleanup_protect.json (рядом с конфигом): {тип: [равкоды]}\\nЖивые дамми-абилки и их баффы, которые сканер может спутать с мусором.\\nФормат: {\"buff\": ["B00C", "B023"], "ability": ["A066"]}')
+        self._cleanup_v_prot = v_prot
+        self._fit_toplevel(win, min_w=980, min_h=700)
+        return win
+
+    def _trigclean_scan(self, e_dir, win, lbl, *vars_):
+        tgt = e_dir.get().strip()
+        if not os.path.isdir(tgt):
+            messagebox.showwarning('Путь', 'Укажи папку карты.')
+            return
+        self._cleanup_remember(tgt)
+        v_dirs, v_txt, v_dis, v_clo, v_notes, v_glob, v_func, v_casc, v_codej, v_com, e_excl = vars_
+        # 19.09 (вечер): исключения — конфиг↔UI
+        excl_raw = e_excl.get().strip()
+        excl = [x.strip() for x in excl_raw.split(',') if x.strip()]
+        self.cfg.setdefault('cleanup', {})['exclude_dirs'] = excl
+        # 19.09 (вечер): галочки — persist в cfg['trigclean']
+        self.cfg['trigclean'] = {'empty_dirs': v_dirs.get(),
+                                 'del_empty_txt': v_txt.get(),
+                                 'disabled': v_dis.get(),
+                                 'closed': v_clo.get(),
+                                 'del_notes': v_notes.get(),
+                                 'globals': v_glob.get(),
+                                 'dead_funcs': v_func.get(),
+                                 'cascade': v_casc.get(),
+                                 'include_codej': v_codej.get(),
+                                 'comments': v_com.get()}
+        self._save_cfg()
+        opts = {'empty_dirs': v_dirs.get(), 'del_empty_txt': v_txt.get(),
+                'disabled': v_dis.get() or v_clo.get(), 'closed': v_clo.get(),
+                'del_notes': v_notes.get(), 'globals': v_glob.get(),
+                'dead_funcs': v_func.get(), 'cascade': v_casc.get(),
+                'include_codej': v_codej.get(), 'comments': v_com.get(),
+                'exclude_dirs': excl}
+        opath = os.path.join(HERE, 'triggers_opts.json')
+        io.open(opath, 'wb').write(json.dumps(opts).encode('utf-8'))
+        lbl.configure(text='скан идёт (1-3 мин)...')
+        self._log('>>> Чистка триггеров: скан %s' % tgt)
+        tree = self._trigclean_state['tree']
+        tree.delete(*tree.get_children())
+        def work():
+            try:
+                r = subprocess.run([sys.executable, '-u', os.path.join(HERE, 'stage_triggers.py'),
+                                    CFG, '--scan', opath],
+                                   capture_output=True, text=True, encoding='utf-8',
+                                   errors='replace', cwd=HERE, timeout=600)
+                win.after(0, lambda: self._trigclean_show(r.returncode, (r.stdout or '') + (r.stderr or ''), tgt, opts))
+            except Exception as e:
+                win.after(0, lambda: self._trigclean_show(1, str(e), tgt, opts))
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+
+    def _trigclean_show(self, code, out, tgt, opts):
+        lbl = self._trigclean_state['lbl']
+        tree = self._trigclean_state['tree']
+        for l in out.splitlines():
+            if l.strip():
+                self._log('  ' + l[:160])
+        if code != 0:
+            lbl.configure(text='скан не удался')
+            self._log('>>> Скан триггеров: ОШИБКА', 'err')
+            return
+        try:
+            res = json.load(io.open(os.path.join(HERE, 'triggers_scan.json'), 'rb'))
+        except Exception as e:
+            lbl.configure(text='нет результатов')
+            self._log('>>> Скан триггеров: не прочитан результат: %s' % e, 'err')
+            return
+        self._trigclean_state['scan'] = res
+        self._trigclean_state['dir'] = tgt
+        n = 0
+        for rel in res.get('empty_txt', []):
+            tree.insert('', 'end', values=('', os.path.basename(rel), '0', 'пустой .txt'))
+            n += 1
+        for rel in res.get('empty_dirs', []):
+            tree.insert('', 'end', values=('', rel, '', 'пустая папка'))
+            n += 1
+        for tr in res.get('disabled', []):
+            why = ','.join(tr.get('flags', []))
+            if tr.get('used_by'):
+                why += ' | ИСПОЛЬЗУЕТСЯ: ' + ', '.join(tr['used_by'][:3])
+            if tr.get('note'):
+                why += ' | ' + tr['note']
+            tree.insert('', 'end', values=(tr.get('cat_disk', ''), tr.get('disk', ''),
+                                           tr.get('size', 0), why))
+            n += 1
+        for g in res.get('globals_unused', []):
+            tree.insert('', 'end', values=('глобалка', g, '', 'не упоминается в коде'))
+            n += 1
+        for name, rels in sorted(res.get('dead_funcs', {}).items()):
+            tree.insert('', 'end', values=(os.path.dirname(rels[0]) if rels else '', name,
+                                           '', 'мёртвая функция: ' + (', '.join(os.path.basename(r) for r in rels[:2]))))
+            n += 1
+        lbl.configure(text='найдено: %d' % n)
+        self._log('>>> Чистка триггеров: скан %s — найдено %d' % (tgt, n), 'ok')
+
+    def _trigclean_delete(self, e_dir, lbl, dry=False):
+        st = getattr(self, '_trigclean_state', None)
+        if not st or not st.get('scan'):
+            messagebox.showwarning('Скан', 'Сначала запусти Скан.')
+            return
+        tree = st['tree']
+        sel = tree.selection()
+        if not sel:
+            messagebox.showwarning('Выбор', 'Выдели строки для удаления.')
+            return
+        # 19.09 (вечер): ДЕМО — без подтверждения и записи
+        if dry:
+            pass
+        elif not messagebox.askyesno('Подтверждение', 'Удалить %d записей?\nПеред удалением будет бэкап (включая catalog.lml и variable.lml).' % len(sel)):
+            return
+        # собираю delete-JSON по категориям
+        d = {'empty_dirs': [], 'empty_txt': [], 'disabled': [], 'globals': [], 'dead_funcs': {}}
+        scan = st['scan']
+        for item in sel:
+            vals = tree.item(item, 'values')
+            cat, name, size, why = vals[0], vals[1], vals[2], vals[3]
+            if why.startswith('пустая папка'):
+                d['empty_dirs'].append(name)
+            elif why.startswith('пустой .txt'):
+                for rel in scan.get('empty_txt', []):
+                    if os.path.basename(rel) == name:
+                        d['empty_txt'].append(rel)
+                        break
+            elif why.startswith('Disab') or why.startswith('Closed') or 'Disab' in why or 'Closed' in why:
+                for tr in scan.get('disabled', []):
+                    if tr.get('disk') == name and tr.get('cat_disk') == cat:
+                        d['disabled'].append(tr)
+                        break
+            elif cat == 'глобалка':
+                d['globals'].append(name)
+            elif why.startswith('мёртвая функция'):
+                if name in scan.get('dead_funcs', {}):
+                    d['dead_funcs'][name] = scan['dead_funcs'][name]
+        jp = os.path.join(HERE, 'triggers_delete.json')
+        io.open(jp, 'wb').write(json.dumps(d, ensure_ascii=False, indent=1).encode('utf-8'))
+        lbl.configure(text='демо...' if dry else 'удаление...')
+        def work():
+            try:
+                cmd = [sys.executable, '-u', os.path.join(HERE, 'stage_triggers.py'),
+                       CFG, '--delete', jp]
+                # 19.09 (вечер): ДЕМО — флаг --dry, без записи
+                if dry:
+                    cmd.append('--dry')
+                r = subprocess.run(cmd,
+                                   capture_output=True, text=True, encoding='utf-8',
+                                   errors='replace', cwd=HERE, timeout=600)
+                win = st['win']
+                out = (r.stdout or '') + (r.stderr or '')
+                if dry:
+                    # открыть демо-лог (строка ЛОГ: путь)
+                    for l in out.splitlines():
+                        if l.startswith('ЛОГ: '):
+                            try:
+                                os.startfile(l[5:].strip())
+                            except Exception:
+                                pass
+                            break
+                    win.after(0, lambda: self._trigclean_deleted(r.returncode, out, len(sel), lbl, tree, [], dry=True))
+                else:
+                    win.after(0, lambda: self._trigclean_deleted(r.returncode, out, len(sel), lbl, tree, sel, dry=dry))
+            except Exception as e:
+                win = st['win']
+                win.after(0, lambda: self._trigclean_deleted(1, str(e), 0, lbl, tree, sel))
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+
+    def _trigclean_deleted(self, code, out, n, lbl, tree, sel, dry=False):
+        for l in out.splitlines():
+            if l.strip():
+                self._log('  ' + l[:160])
+        if code == 0:
+            self._log('>>> ДЕМО завершено: ничего не записано, лог открыт' if dry
+                      else '>>> Чистка триггеров завершена, лог в logs/', 'ok')
+            for item in sel:
+                tree.delete(item)
+            lbl.configure(text=('демо: %d будет удалено' if dry else 'удалено: %d') % n)
+        else:
+            lbl.configure(text='ошибка удаления')
+            self._log('>>> Чистка триггеров: ОШИБКА', 'err')
+
+    def _triggers_window(self):
+        win = ctk.CTkToplevel(self)
+        win.title('Перенос триггеров')
+        # 29.09: авто-подгонка под контент (вместо жёсткой 760x560)
+        # 19.09: CTk-баг — Toplevel рождается позади
+        def _front():
+            try:
+                win.lift()
+                win.focus_force()
+            except Exception:
+                pass
+        win.after(200, _front)
+
+        src = self.e_src.get().strip()
+        trig = os.path.join(src, 'trigger')
+        top, ti = self._card(win, 'Подпапки триггеров источника')
+        top.pack(fill="both", expand=True, padx=8, pady=6)
+        ctk.CTkLabel(ti, text=src, font=FONT_SMALL, anchor="w").pack(fill="x", pady=2)
+
+        lb = tk.Listbox(ti, selectmode='extended', exportselection=False,
+                        font=('Consolas', 11), activestyle='none',
+                        bg="#181b21" if APPEARANCE == 'dark' else "#ffffff",
+                        fg="#e8edf4" if APPEARANCE == 'dark' else "#1a1a1a",
+                        selectbackground="#2d5aa8", selectforeground="#ffffff",
+                        borderwidth=0, highlightthickness=0)
+        sb = ctk.CTkScrollbar(ti, command=lb.yview)
+        lb.configure(yscrollcommand=sb.set)
+        lb.pack(side='left', fill='both', expand=True)
+        sb.pack(side='right', fill='y')
+        Tooltip(lb, 'Выдели подпапки для переноса (Ctrl/Shift — как в проводнике).\nПусто = перенести ВСЁ.')
+
+        subs = []
+        if os.path.isdir(trig):
+            for x in sorted(os.listdir(trig)):
+                if os.path.isdir(os.path.join(trig, x)):
+                    n = sum(1 for f in os.listdir(os.path.join(trig, x)) if f.endswith('.j'))
+                    subs.append((x, n))
+        for x, n in subs:
+            lb.insert('end', '%s  (%d .j)' % (x, n))
+
+        info = ctk.CTkLabel(ti, text='', font=FONT_SMALL, anchor="w")
+        info.pack(fill="x", pady=4)
+
+        btns = ctk.CTkFrame(win, fg_color="transparent")
+        btns.pack(fill="x", padx=8, pady=6)
+        ctk.CTkButton(btns, text='Выделить всё', height=30,
+                      command=lambda: lb.select_set(0, 'end')).pack(side='left', padx=3)
+        ctk.CTkButton(btns, text='Снять выделение', height=30,
+                      command=lambda: lb.select_clear(0, 'end')).pack(side='left', padx=3)
+
+        def do_transfer():
+            sel = [lb.get(i).rsplit('  (', 1)[0] for i in lb.curselection()]
+            cfgp = self._cfg_path()
+            cfg = json.load(io.open(cfgp, 'rb'))
+            cfg.setdefault('code', {})['only_dirs'] = sel
+            io.open(cfgp, 'wb').write(json.dumps(cfg, indent=2, ensure_ascii=False).encode('utf-8'))
+            self._log('Перенос триггеров: %s -> %s' % (len(sel) if sel else 'ВСЁ', ', '.join(sel[:8]) + ('...' if len(sel) > 8 else '')))
+            win.destroy()
+            self._run([['--stage', 'code'], ['--stage', 'verify']])
+
+        ctk.CTkButton(btns, text='ПЕРЕНЕСТИ ВЫБРАННЫЕ', height=36,
+                      fg_color="#1e8e3e", hover_color="#156a2e",
+                      command=do_transfer).pack(side='left', padx=8)
+        ctk.CTkButton(btns, text='Закрыть', height=30,
+                      command=win.destroy).pack(side='right', padx=3)
+
+        def upd_info(e=None):
+            n = len(lb.curselection())
+            files = 0
+            for i in lb.curselection():
+                files += subs[i][1]
+            info.configure(text='Выбрано: %d папок, %d файлов .j' % (n, files) if n else 'Не выбрано — перенесётся ВСЁ (%d файлов)' % sum(x[1] for x in subs))
+        lb.bind('<<ListboxSelect>>', upd_info)
+        upd_info()
+        self._fit_toplevel(win, min_w=760, min_h=560)
+        return win
+
+    # ---------- окно чистки ----------
+
+    def _cleanup_window(self):
+        win = ctk.CTkToplevel(self)
+        win.title('Чистка карты')
+        # 29.09: авто-подгонка под контент (вместо жёсткой 980x640)
+        # 19.09: CTk-баг — Toplevel рождается позади
+        # главного окна, кажется что кнопка не нажалась
+        def _front():
+            try:
+                win.lift()
+                win.focus_force()
+            except Exception:
+                pass
+        win.after(200, _front)
+
+        top, ti = self._card(win, 'Карта')
+        top.pack(fill='x', padx=8, pady=6)
+        row = ctk.CTkFrame(ti, fg_color="transparent")
+        row.pack(fill="x")
+        ctk.CTkLabel(row, text='Папка карты:', font=FONT_SMALL).pack(side='left')
+        e_dir = ctk.CTkEntry(row, font=FONT_MONO, height=30)
+        e_dir.pack(side='left', fill='x', expand=True, padx=6)
+        # 19.09: восстановить последнюю карту чистки из конфига
+        last_dir = self.cfg.get('cleanup', {}).get('last_dir', '')
+        e_dir.insert(0, last_dir if last_dir else self.e_tgt.get().strip())
+        Tooltip(e_dir, 'Папка карты в lni-формате (table/*.ini + trigger/).')
+        ctk.CTkButton(row, text='...', width=36, height=30,
+                      command=lambda: self._cleanup_pick(e_dir)).pack(side='left')
+
+        opts, oi = self._card(win, 'Что чистим')
+        opts.pack(fill='x', padx=8, pady=4)
+        v_unused = tk.BooleanVar(value=False)
+        v_bad = tk.BooleanVar(value=False)
+        v_suf = tk.BooleanVar(value=False)
+        v_casc = tk.BooleanVar(value=True)
+        cb1 = ctk.CTkCheckBox(oi, text='Неиспользуемые объекты', variable=v_unused,
+                              font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        cb1.pack(anchor='w', pady=2)
+        Tooltip(cb1, 'Объекты без ссылок из кода и других объектов.\nСтандартные WC3 и mustuse (Avul, Amov...) не трогаются.')
+        cb2 = ctk.CTkCheckBox(oi, text='Битые равкоды', variable=v_bad,
+                              font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        cb2.pack(anchor='w', pady=2)
+        Tooltip(cb2, 'Равкод не 4 символа или неверный префикс типа\n(юнит E/H/N/O/U, способность A, бафф B/X, предмет I, улучшение R).')
+        cb3 = ctk.CTkCheckBox(oi, text='По суффиксу редактора', variable=v_suf,
+                              font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        cb3.pack(anchor='w', pady=2)
+        Tooltip(cb3, 'Способности с суффиксом (убрано)/(Убрано)/не используется\n+ ручной список равкодов в конфиге (cleanup.manual_ids).')
+        # 19.09 (вечер): редактируемый список суффиксов (конфиг↔UI)
+        sr = ctk.CTkFrame(oi, fg_color="transparent")
+        sr.pack(fill="x", pady=2)
+        ctk.CTkLabel(sr, text='Суффиксы (через запятую):', font=FONT_SMALL).pack(side='left', padx=(0, 6))
+        e_suf = ctk.CTkEntry(sr, font=FONT_MONO, height=28)
+        e_suf.pack(side='left', fill='x', expand=True)
+        suf_cfg = self.cfg.get('cleanup', {}).get('suffix_patterns', sc.DEFAULT_SUFFIX_PATTERNS)
+        e_suf.insert(0, ', '.join(suf_cfg))
+        Tooltip(e_suf, 'Подстроки в названии объекта, по которым он считается\n«убранным» (например: (убрано), не используется, Копировать).\nСохраняется в конфиг (cleanup.suffix_patterns).')
+        cr = ctk.CTkFrame(oi, fg_color="transparent")
+        cr.pack(fill="x", pady=2)
+        ctk.CTkLabel(cr, text='Каскад:', font=FONT_SMALL).pack(side='left', padx=(0, 6))
+        ctk.CTkCheckBox(cr, text='удалять и то, что держалось только на мёртвых (волнами, видно до подтверждения)',
+                        variable=v_casc, font=FONT_SMALL,
+                        checkbox_width=18, checkbox_height=18).pack(side='left')
+        tr = ctk.CTkFrame(oi, fg_color="transparent")
+        tr.pack(fill="x", pady=2)
+        ctk.CTkLabel(tr, text='Типы:', font=FONT_SMALL).pack(side='left', padx=(0, 6))
+        self._type_vars = {}
+        for tid, tname in [('unit', 'Юниты'), ('ability', 'Способности'), ('item', 'Предметы'),
+                           ('buff', 'Баффы'), ('upgrade', 'Улучшения'), ('doodad', 'Декорации'),
+                           ('destructable', 'Разрушаемые')]:
+            v = tk.BooleanVar(value=True)
+            cb = ctk.CTkCheckBox(tr, text=tname, variable=v, font=FONT_SMALL,
+                                 checkbox_width=18, checkbox_height=18)
+            cb.pack(side='left', padx=4)
+            self._type_vars[tid] = v
+        Tooltip(tr, 'Фильтр скана: показывать и удалять только отмеченные типы.')
+
+        # список (Treeview — ttk, стилизованный под тему)
+        lst, li = self._card(win, 'Скан (выдели строки и подтверди удаление)')
+        lst.pack(fill='both', expand=True, padx=8, pady=4)
+        dark = APPEARANCE == 'dark'
+        style = ttk.Style(win)
+        style.configure('Clean.Treeview', background="#181b21" if dark else "#ffffff",
+                        fieldbackground="#181b21" if dark else "#ffffff",
+                        foreground="#e8edf4" if dark else "#1a1a1a",
+                        font=('Segoe UI', 10), rowheight=24, borderwidth=0)
+        style.map('Clean.Treeview', background=[('selected', '#2d5aa8')],
+                  foreground=[('selected', '#ffffff')])
+        style.configure('Clean.Treeview.Heading', font=('Segoe UI', 10, 'bold'),
+                        background="#262b33" if dark else "#e3e8ef",
+                        foreground="#e8edf4" if dark else "#1a1a1a", padding=(6, 4))
+        tree = ttk.Treeview(li, columns=('id', 'type', 'name'), show='headings', height=14,
+                            selectmode='extended', style='Clean.Treeview')
+        tree.heading('id', text='Равкод')
+        tree.heading('type', text='Тип')
+        tree.heading('name', text='Имя / причина')
+        tree.column('id', width=90)
+        tree.column('type', width=100)
+        tree.column('name', width=560)
+        tree.pack(side='left', fill='both', expand=True, padx=4, pady=4)
+        sb = ctk.CTkScrollbar(li, command=tree.yview)
+        sb.pack(side='left', fill='y')
+        tree.configure(yscrollcommand=sb.set)
+        tree.bind('<Control-a>', lambda e: (tree.selection_set(tree.get_children()), 'break')[1])
+        tree.bind('<Control-A>', lambda e: (tree.selection_set(tree.get_children()), 'break')[1])
+
+        # панель кнопок — 19.09: два ряда, чтобы влезали
+        btns = ctk.CTkFrame(win, fg_color="transparent")
+        btns.pack(fill='x', padx=8, pady=(4, 2))
+        btns2 = ctk.CTkFrame(win, fg_color="transparent")
+        btns2.pack(fill='x', padx=8, pady=(0, 2))
+        self._cleanup_state = {'scan': None, 'tree': tree, 'win': win}
+
+        b_scan = ctk.CTkButton(btns, text='1. СКАН', height=36, font=("Segoe UI", 12, "bold"),
+                               command=lambda: self._cleanup_scan(e_dir, v_unused, v_bad, v_suf, v_casc, e_suf))
+        b_scan.pack(side='left', padx=(6, 10), pady=2)
+        Tooltip(b_scan, 'ШАГ 1. Искать мусор в карте.\nРезультат появится в списке ниже.')
+        b_del = ctk.CTkButton(btns, text='2. УДАЛИТЬ ВЫДЕЛЕННОЕ', height=36,
+                              font=("Segoe UI", 12, "bold"),
+                              fg_color="#1e8e3e", hover_color="#156a2e",
+                              command=lambda: self._cleanup_delete(e_dir))
+        b_del.pack(side='left', padx=3, pady=2)
+        Tooltip(b_del, 'ШАГ 2. Удалить отмеченные в списке строки.\nСпросит подтверждение, сделает бэкап.')
+        # 19.09 (вечер): ДЕМО — что будет удалено, без записи
+        b_demo = ctk.CTkButton(btns, text='ДЕМО (без записи)', height=36,
+                               font=("Segoe UI", 11),
+                               fg_color="#b7791f", hover_color="#8a5a13",
+                               command=lambda: self._cleanup_delete(e_dir, dry=True))
+        b_demo.pack(side='left', padx=3, pady=2)
+        Tooltip(b_demo, 'ПОКАЗАТЬ какие объекты будут удалены —\nБЕЗ записи в таблицы и без бэкапа.\nПишет лог (logs/cleanup-дата-demo.md) и открывает его.')
+        b_rep = ctk.CTkButton(btns, text='ПОЧИНИТЬ ТАБЛИЦЫ', height=36,
+                              font=("Segoe UI", 12, "bold"),
+                              fg_color="#b7791f", hover_color="#9a6a12",
+                              command=lambda: self._repair_tables(e_dir))
+        b_rep.pack(side='left', padx=(10, 3), pady=2)
+        Tooltip(b_rep, 'Авто-починка table/*.ini: self-parent (родитель = сам себе),\nбитые _parent -> дефолт типа, дубли секций, разбаланс [=[ ]=].\nПервый запуск = скан, повторный = починка (бэкап + лог).')
+        # 19.09: второй ряд — мелкие кнопки
+        ctk.CTkButton(btns2, text='Выделить всё', height=30,
+                      command=lambda: self._cleanup_select_all(tree)).pack(side='left', padx=(6, 3), pady=2)
+        ctk.CTkLabel(btns2, text='Фильтр:', font=FONT_SMALL).pack(side='left', padx=(10, 2))
+        e_f = ctk.CTkEntry(btns2, width=140, height=28, font=FONT_SMALL)
+        e_f.pack(side='left')
+        Tooltip(e_f, 'Показать в списке только строки с этим текстом\n(имя, тип или причина). Очисти поле и Enter — сброс.')
+        e_f.bind('<Return>', lambda e: self._cleanup_filter(tree, e_f.get().strip()))
+        ctk.CTkButton(btns2, text='Открыть лог', height=30,
+                      command=self._cleanup_open_log).pack(side='left', padx=3)
+        lbl = ctk.CTkLabel(btns2, text='', font=FONT_SMALL)
+        lbl.pack(side='left', padx=10)
+        self._cleanup_lbl = lbl
+        self._fit_toplevel(win, min_w=980, min_h=640)
+        return win
+
+    def _cleanup_pick(self, entry):
+        # 19.09: выбор карты чистки + сохранение в конфиг
+        d = filedialog.askdirectory()
+        if d:
+            entry.delete(0, 'end')
+            entry.insert(0, d)
+            self.cfg.setdefault('cleanup', {})['last_dir'] = d
+            self._save_cfg()
+
+    def _cleanup_remember(self, tgt):
+        # 19.09: запомнить карту чистки (скан/удаление/починка)
+        self.cfg.setdefault('cleanup', {})['last_dir'] = tgt
+        self._save_cfg()
+
+    def _cleanup_scan(self, e_dir, v_unused, v_bad, v_suf, v_casc, e_suf=None):
+        tgt = e_dir.get().strip()
+        if not os.path.isdir(tgt):
+            messagebox.showwarning('Путь', 'Укажи папку карты.')
+            return
+        self._cleanup_remember(tgt)
+        # 19.09 (вечер): суффиксы — конфиг↔UI (поле в окне)
+        if e_suf is not None:
+            suf = [x.strip() for x in e_suf.get().split(',') if x.strip()]
+            self.cfg.setdefault('cleanup', {})['suffix_patterns'] = suf
+            self._save_cfg()
+        patterns = self.cfg.get('cleanup', {}).get('suffix_patterns', sc.DEFAULT_SUFFIX_PATTERNS)
+        manual = self.cfg.get('cleanup', {}).get('manual_ids', {})
+        # 19.09: защитный список — если галочка стоит
+        protect = {}
+        if self._cleanup_v_prot.get():
+            self.cfg.setdefault('cleanup', {})['protect'] = True
+            pp = os.path.join(os.path.dirname(self._cfg_path()), 'cleanup_protect.json')
+            if os.path.exists(pp):
+                protect = json.load(io.open(pp, 'rb'))
+        else:
+            self.cfg.setdefault('cleanup', {})['protect'] = False
+        self._save_cfg()
+        res = sc.scan(tgt, patterns, manual, protect)
+        self._cleanup_state = {'scan': res, 'dir': tgt, 'casc': v_casc.get(),
+                               'filters': {'unused': v_unused.get(), 'bad': v_bad.get(), 'suf': v_suf.get()},
+                               'tree': self._cleanup_state['tree'], 'win': self._cleanup_state['win']}
+        tree = self._cleanup_state['tree']
+        tree.delete(*tree.get_children())
+        self._cleanup_all_iids = None
+        allowed = {tid for tid, v in getattr(self, '_type_vars', {}).items() if v.get()} or set(sc.TYPES)
+        show_suf = v_suf.get()
+        show_bad = v_bad.get()
+        show_unused = v_unused.get()
+        n = 0
+        for t, d in res['suffix'].items():
+            if t not in allowed or not show_suf:
+                continue
+            for sid, v in d.items():
+                tree.insert('', 'end', values=(sid, t, (v['name'] or '') + '  [суффикс: ' + v['pattern'] + ']'))
+                n += 1
+        for t, d in res['badcode'].items():
+            if t not in allowed or not show_bad:
+                continue
+            for sid, v in d.items():
+                tree.insert('', 'end', values=(sid, t, (v['name'] or '') + '  [битый равкод]'))
+                n += 1
+        for t, d in res['unused'].items():
+            if t not in allowed or not show_unused:
+                continue
+            for sid, v in d.items():
+                tree.insert('', 'end', values=(sid, t, (v['name'] or '') + '  [не используется]'))
+                n += 1
+        for i, w in enumerate(res['waves']):
+            if i == 0 or not show_unused:
+                continue
+            for sid, v in w.items():
+                if v['type'] not in allowed:
+                    continue
+                tree.insert('', 'end', values=(sid, v['type'], (v['name'] or '') + '  [каскад, волна %d <- %s]' % (i, ', '.join(v['owners'][:3]))))
+                n += 1
+        self._cleanup_lbl.configure(text='найдено: %d' % n)
+        self._log('>>> Чистка: скан %s — найдено %d' % (tgt, n), 'ok')
+
+    def _cleanup_delete(self, e_dir, dry=False):
+        st = getattr(self, '_cleanup_state', None)
+        if not st or not st.get('scan'):
+            messagebox.showwarning('Скан', 'Сначала запусти Скан.')
+            return
+        self._cleanup_remember(e_dir.get().strip())
+        tree = st['tree']
+        sel = tree.selection()
+        if not sel:
+            messagebox.showwarning('Выбор', 'Выдели строки для удаления (Ctrl/Shift для группы).')
+            return
+        # 19.09 (вечер): ДЕМО — без подтверждения и записи
+        if dry:
+            pass
+        elif not messagebox.askyesno('Подтверждение', 'Удалить %d объектов?\nПеред удалением будет бэкап.' % len(sel)):
+            return
+        del_list = {}
+        for item in sel:
+            sid, t = tree.item(item, 'values')[0], tree.item(item, 'values')[1]
+            del_list.setdefault(t, []).append(sid)
+        lines = sc.delete(st['dir'], del_list,
+                          os.path.join(HERE, 'logs'),
+                          os.path.join(HERE, 'transfer_backup', 'cleanup'),
+                          dry=dry)
+        for l in lines:
+            self._log('  ' + l)
+        # 19.09 (вечер): ДЕМО — открыть лог, ничего не удалять из списка
+        if dry:
+            for l in lines:
+                if l.startswith('ЛОГ: '):
+                    try:
+                        os.startfile(l[5:].strip())
+                    except Exception:
+                        pass
+                    break
+            self._log('>>> ДЕМО завершено: ничего не записано, лог открыт', 'ok')
+            self._cleanup_lbl.configure(text='демо: %d будет удалено' % len(sel))
+            return
+        self._log('>>> Чистка завершена, лог в logs/', 'ok')
+        for item in sel:
+            tree.delete(item)
+        self._cleanup_lbl.configure(text='удалено: %d' % len(sel))
+
+    def _repair_tables(self, e_dir):
+        tgt = e_dir.get().strip()
+        if not os.path.isdir(tgt):
+            messagebox.showwarning('Путь', 'Укажи папку карты.')
+            return
+        self._cleanup_remember(tgt)
+        first = not getattr(self, '_repair_ran', False) or getattr(self, '_repair_tgt', '') != tgt
+        self._repair_tgt = tgt
+        if not first and not messagebox.askyesno('Починка', 'Применить правки к таблицам?\nПеред записью будет бэкап.'):
+            return
+        lines, total = sr.repair(tgt, None, os.path.join(HERE, 'transfer_backup', 'repair'), do=not first)
+        for l in lines:
+            self._log('  ' + l)
+        if total:
+            if first:
+                self._repair_ran = True
+                self._log('>>> Починка: скан — найдено %d проблем. Запусти ещё раз для применения (бэкап + лог).' % total, 'warn')
+            else:
+                os.makedirs(os.path.join(HERE, 'logs'), exist_ok=True)
+                lp = os.path.join(HERE, 'logs', 'repair-%s.md' % time.strftime('%Y-%m-%d'))
+                io.open(lp, 'ab').write((chr(10).join(lines) + chr(10) + chr(10)).encode('utf-8'))
+                self._log('>>> Починка применена: %d правок, лог %s' % (total, lp), 'ok')
+        else:
+            self._log('>>> Починка: проблем не найдено', 'ok')
+
+    # 29.09: деобфускация имён (deob.py, сторонний скрипт юзера) — режим Обслуживания
+
+    def _deob_window(self):
+        """29.09: деобфускатор имён deob.py. Вход: файл .j.
+        СКАН = прогон во временную папку (вход не трогается) + парсинг отчёта.
+        ПРИМЕНИТЬ = выход <имя>_deobfuscated.j + rename_map.csv рядом с входом.
+        VERIFY-отчёт в журнал GUI."""
+        win = ctk.CTkToplevel(self)
+        win.title('Деобфускация имён')
+        def _front():
+            try:
+                win.lift(); win.focus_force()
+            except Exception:
+                pass
+        win.after(200, _front)
+
+        top, ti = self._card(win, 'Скрипт карты')
+        top.pack(fill='x', padx=8, pady=6)
+        row = ctk.CTkFrame(ti, fg_color="transparent")
+        row.pack(fill="x")
+        ctk.CTkLabel(row, text='Файл .j:', font=FONT_SMALL).pack(side='left')
+        e_file = ctk.CTkEntry(row, font=FONT_MONO, height=30)
+        e_file.pack(side='left', fill='x', expand=True, padx=6)
+        last = self.cfg.get('deob', {}).get('last_path', '')
+        e_file.insert(0, last if last else self.e_tgt.get().strip())
+        Tooltip(e_file, 'Обычный JASS-скрипт (war3map.j / code.j).\nvJass-директивы //! сохраняются, но не разворачиваются.')
+        ctk.CTkButton(row, text='...', width=36, height=30,
+                      command=lambda: self._deob_pick(e_file)).pack(side='left')
+
+        info, ii = self._card(win, 'Отчёт')
+        info.pack(fill='x', padx=8, pady=4)
+        lbl = ctk.CTkLabel(ii, text='нет данных', font=FONT_SMALL, anchor='w',
+                           justify='left')
+        lbl.pack(fill='x', pady=2)
+
+        btns = ctk.CTkFrame(win, fg_color="transparent")
+        btns.pack(fill='x', padx=8, pady=6)
+        b_scan = ctk.CTkButton(btns, text='1. СКАН (пробный прогон)', height=36,
+                                font=("Segoe UI", 12, "bold"),
+                                command=lambda: self._deob_scan(e_file, lbl))
+        b_scan.pack(side='left', padx=(6, 10), pady=2)
+        Tooltip(b_scan, 'Прогон deob.py во временную папку — вход НЕ трогается.\nПоказывает: число функций/глобалов, переименований, VERIFY-статус.')
+        b_run = ctk.CTkButton(btns, text='2. ПРИМЕНИТЬ', height=36,
+                              font=("Segoe UI", 12, "bold"),
+                              fg_color="#1e8e3e", hover_color="#156a2e",
+                              command=lambda: self._deob_apply(e_file, lbl))
+        b_run.pack(side='left', padx=3, pady=2)
+        Tooltip(b_run, "Деобфускация: выход <имя>_deobfuscated.j + rename_map.csv\nрядом с входом. Вход не изменяется.\nVERIFY: OK = токен-эквивалентность гарантирована.")
+
+        self._fit_toplevel(win, min_w=760, min_h=360)
+        return win
+
+    def _deob_pick(self, entry):
+        p = filedialog.askopenfilename(filetypes=[('JASS', '*.j'), ('Все файлы', '*.*')])
+        if p:
+            entry.delete(0, 'end'); entry.insert(0, p)
+
+    def _deob_run(self, src, out_dir):
+        """Прогон deob.py: src -> out_dir/<имя>_deobfuscated.j + rename_map.csv.
+        Возвращает (ok, текст отчёта)."""
+        import subprocess
+        base = os.path.splitext(os.path.basename(src))[0]
+        out = os.path.join(out_dir, base + '_deobfuscated.j')
+        mapf = os.path.join(out_dir, 'rename_map.csv')
+        cmd = [sys.executable, os.path.join(HERE, 'deob2.py'), src,
+               '-o', out, '-m', mapf]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True,
+                               encoding='utf-8', errors='replace', timeout=300)
+            return r.returncode == 0, (r.stdout or '') + (r.stderr or '')
+        except Exception as ex:
+            return False, 'ошибка запуска deob.py: %s' % ex
+
+    def _deob_scan(self, e_file, lbl):
+        p = e_file.get().strip()
+        if not p or not os.path.isfile(p):
+            messagebox.showwarning('Путь', 'Укажи файл .j.')
+            return
+        self.cfg.setdefault('deob', {})['last_path'] = p
+        self._save_cfg()
+        lbl.configure(text='сканирую...')
+        def work():
+            import tempfile
+            with tempfile.TemporaryDirectory() as td:
+                ok, rep = self._deob_run(p, td)
+            def upd():
+                lbl.configure(text=rep.replace('\n', ' | ')[:400])
+                self._log('>>> Деобфускация, СКАН (%s):' % ('ok' if ok else 'FAIL'))
+                for l in rep.splitlines():
+                    if l.strip():
+                        self._log('  ' + l)
+            self.after(0, upd)
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+
+    def _deob_apply(self, e_file, lbl):
+        p = e_file.get().strip()
+        if not p or not os.path.isfile(p):
+            messagebox.showwarning('Путь', 'Укажи файл .j.')
+            return
+        if not messagebox.askyesno('Деобфускация',
+                'Запустить деобфускацию?\nВход не изменяется; рядом появятся\n<имя>_deobfuscated.j и rename_map.csv'):
+            return
+        def work():
+            out_dir = os.path.dirname(p) or '.'
+            ok, rep = self._deob_run(p, out_dir)
+            def upd():
+                lbl.configure(text=rep.replace('\n', ' | ')[:400])
+                self._log('>>> Деобфускация (%s):' % ('ГОТОВО' if ok else 'FAIL'),
+                          'ok' if ok else 'err')
+                for l in rep.splitlines():
+                    if l.strip():
+                        self._log('  ' + l)
+            self.after(0, upd)
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+
+    # 21.09: конверт равкодов (0xXXXXXXXX -> 'RAWC') — режим Обслуживания
+
+    def _rawconv_window(self):
+        """21.09: конвертер равкодов — разовая операция. Вход: файл или
+        папка карты (auto: map/war3map.j, war3map.j, trigger/code.j).
+        Скан -> применение с бэкапом. Лог замен рядом с файлом."""
+        win = ctk.CTkToplevel(self)
+        win.title('Конверт равкодов')
+        # 29.09: авто-подгонка под контент (вместо жёсткой 760x420)
+        def _front():
+            try:
+                win.lift()
+                win.focus_force()
+            except Exception:
+                pass
+        win.after(200, _front)
+
+        import stage_rawconv as rc
+
+        top, ti = self._card(win, 'Скрипт карты')
+        top.pack(fill='x', padx=8, pady=6)
+        row = ctk.CTkFrame(ti, fg_color="transparent")
+        row.pack(fill="x")
+        ctk.CTkLabel(row, text='Файл или папка:', font=FONT_SMALL).pack(side='left')
+        e_dir = ctk.CTkEntry(row, font=FONT_MONO, height=30)
+        e_dir.pack(side='left', fill='x', expand=True, padx=6)
+        last = self.cfg.get('rawconv', {}).get('last_path', '')
+        e_dir.insert(0, last if last else self.e_tgt.get().strip())
+        Tooltip(e_dir, 'Файл .j ИЛИ папка карты (lni) — при папке ищутся\nmap/war3map.j, war3map.j, trigger/code.j автоматически.')
+        ctk.CTkButton(row, text='...', width=36, height=30,
+                      command=lambda: self._rawconv_pick(e_dir)).pack(side='left')
+
+        # 29.09: направление конверта — туда/обратно
+        dirc, dirci = self._card(win, 'Направление')
+        dirc.pack(fill='x', padx=8, pady=4)
+        v_dir = ctk.StringVar(value=self.cfg.get('rawconv', {}).get('last_dir', 'to'))
+        for val, txt, tip in (
+            ('to', 'туда (деобфускация)', "'Amrf' <- 0x/dec/$ (читаемый вид)"),
+            ('from', 'обратно (обфускация)', "'Amrf' -> 0x/dec/$ (скрытый вид)"),
+        ):
+            rb = ctk.CTkRadioButton(dirci, text=txt, variable=v_dir, value=val,
+                                    font=FONT_SMALL)
+            rb.pack(side='left', padx=(6, 10))
+            Tooltip(rb, tip)
+
+        # 29.09: целевая форма для обратного направления
+        tofc, tofci = self._card(win, 'Целевая форма (обратно)')
+        tofc.pack(fill='x', padx=8, pady=4)
+        v_to = ctk.StringVar(value=self.cfg.get('rawconv', {}).get('last_to', 'hex'))
+        for val, txt, tip in (
+            ('hex', '0x...', "'Amrf' -> 0x416D7266"),
+            ('dec', 'dec', "'Amrf' -> 1097691750 (десятичное число)"),
+            ('jhex', '$...', "'Amrf' -> $416D7266 ($-hex JASS)"),
+        ):
+            rb = ctk.CTkRadioButton(tofci, text=txt, variable=v_to, value=val,
+                                    font=FONT_SMALL)
+            rb.pack(side='left', padx=(6, 10))
+            Tooltip(rb, tip)
+
+        # 29.09: выбор режима конверта — hex / dec / оба
+        rmode, rmi = self._card(win, 'Режим')
+        rmode.pack(fill='x', padx=8, pady=4)
+        v_mode = ctk.StringVar(value=self.cfg.get('rawconv', {}).get('last_mode', 'both'))
+        for val, txt, tip in (
+            ('both', 'оба', 'hex-литералы (0x416D7266) и десятичные (1097691750).\nСначала hex, потом dec.'),
+            ('hex', 'hex', "только 0xXXXXXXXX -> 'RAWC'"),
+            ('dec', 'dec', "только десятичные обфусцированные равкоды:\nUnitRemoveAbility(u, 1097691750) -> 'Amrf'.\nКонвертируются только числа, чьи 4 байта — печатаемые ASCII;\nобычные константы (2000000000) пропускаются."),
+            ('jhex', '$hex', "только $-литералы JASS (все длины):\n$D000F -> 851983, $A -> 10, $96 -> 150,\n$416D7266 -> 'Amrf' (если байты печатаемые).\nСемантика не меняется."),
+        ):
+            rb = ctk.CTkRadioButton(rmi, text=txt, variable=v_mode, value=val,
+                                    font=FONT_SMALL)
+            rb.pack(side='left', padx=(6, 10))
+            Tooltip(rb, tip)
+
+        info, ii = self._card(win, 'Скан')
+        info.pack(fill='x', padx=8, pady=4)
+        lbl = ctk.CTkLabel(ii, text='нет данных', font=FONT_SMALL, anchor='w')
+        lbl.pack(fill='x', pady=2)
+
+        btns = ctk.CTkFrame(win, fg_color="transparent")
+        btns.pack(fill='x', padx=8, pady=6)
+        b_scan = ctk.CTkButton(btns, text='1. СКАН', height=36, font=("Segoe UI", 12, "bold"),
+                               command=lambda: self._rawconv_scan(e_dir, lbl, rc, v_mode, v_dir, v_to))
+        b_scan.pack(side='left', padx=(6, 10), pady=2)
+        Tooltip(b_scan, 'Найти скрипт(ы) и посчитать литералы выбранного режима. Без записи.')
+        b_run = ctk.CTkButton(btns, text='2. КОНВЕРТИРОВАТЬ', height=36,
+                              font=("Segoe UI", 12, "bold"),
+                              fg_color="#1e8e3e", hover_color="#156a2e",
+                              command=lambda: self._rawconv_apply(e_dir, lbl, rc, v_mode, v_dir, v_to))
+        b_run.pack(side='left', padx=3, pady=2)
+        Tooltip(b_run, 'Заменить литералы выбранного режима на \'RAWC\' (base-256).\\nПеред записью — бэкап, лог замен рядом с файлом.')
+
+        # 29.09: авто-подгонка под контент (нижние кнопки не обрезаются)
+        self._fit_toplevel(win, min_w=760, min_h=420)
+        # журнал — тот же лог главного окна
+        return win
+
+    def _rawconv_pick(self, entry):
+        # 21.09: выбор файла ИЛИ папки — два диалога через меню выбора
+        q = tk.Toplevel(self)
+        q.title('Выбор'); q.geometry('280x120')
+        q.transient(self)
+        ctk.CTkLabel(q, text='Что выбираем?', font=FONT_SMALL).pack(pady=10)
+        def pick_file():
+            q.destroy()
+            p = filedialog.askopenfilename(filetypes=[('JASS', '*.j'), ('Все файлы', '*.*')])
+            if p:
+                entry.delete(0, 'end'); entry.insert(0, p)
+        def pick_dir():
+            q.destroy()
+            p = filedialog.askdirectory()
+            if p:
+                entry.delete(0, 'end'); entry.insert(0, p)
+        fr = ctk.CTkFrame(q, fg_color='transparent'); fr.pack(pady=6)
+        ctk.CTkButton(fr, text='Файл', width=100, command=pick_file).pack(side='left', padx=6)
+        ctk.CTkButton(fr, text='Папка', width=100, command=pick_dir).pack(side='left', padx=6)
+
+    def _rawconv_scan(self, e_dir, lbl, rc, v_mode=None, v_dir=None, v_to=None):
+        p = e_dir.get().strip()
+        if not p:
+            messagebox.showwarning('Путь', 'Укажи файл или папку карты.')
+            return
+        self.cfg.setdefault('rawconv', {})['last_path'] = p
+        mode = v_mode.get() if v_mode else 'both'
+        direction = v_dir.get() if v_dir else 'to'
+        to_form = v_to.get() if v_to else 'hex'
+        if direction == 'from':
+            mode = 'rawc_' + to_form
+        self.cfg.setdefault('rawconv', {})['last_dir'] = direction
+        self.cfg['rawconv']['last_to'] = to_form
+        self.cfg['rawconv']['last_mode'] = mode
+        self._save_cfg()
+        def work():
+            try:
+                res = rc.scan(p, mode)
+                win_txt = '\n'.join('%s: %d литералов' % (fp, n) for fp, n in res) if res \
+                    else 'скрипт карты не найден'
+            except Exception as ex:
+                win_txt = 'ошибка скана: %s' % ex
+            def upd():
+                lbl.configure(text=win_txt)
+                self._log('>>> Конверт равкодов, скан: ' + win_txt.replace('\n', ' | '))
+            self.after(0, upd)
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+
+    def _rawconv_apply(self, e_dir, lbl, rc, v_mode=None, v_dir=None, v_to=None):
+        p = e_dir.get().strip()
+        if not p:
+            messagebox.showwarning('Путь', 'Укажи файл или папку карты.')
+            return
+        mode = v_mode.get() if v_mode else 'both'
+        direction = v_dir.get() if v_dir else 'to'
+        to_form = v_to.get() if v_to else 'hex'
+        if direction == 'from':
+            mode = 'rawc_' + to_form
+        dir_txt = 'туда' if direction == 'to' else 'обратно (%s)' % to_form
+        if not messagebox.askyesno('Конверт', 'Заменить литералы (%s)?\nНаправление: %s\nПеред записью — бэкап, лог замен рядом с файлом.' % (mode, dir_txt)):
+            return
+        def work():
+            try:
+                lines = rc.run(p, os.path.join(HERE, 'transfer_backup', 'rawconv'), apply=True, mode=mode)
+                self.cfg.setdefault('rawconv', {})['last_dir'] = direction
+                self.cfg['rawconv']['last_to'] = to_form
+                self._save_cfg()
+                self.cfg.setdefault('rawconv', {})['last_mode'] = mode
+                self._save_cfg()
+                txt = '\n'.join(lines)
+                ok = not any('не найден' in l for l in lines)
+            except Exception as ex:
+                txt, ok = 'ошибка: %s' % ex, False
+            def upd():
+                lbl.configure(text=txt.replace('\n', ' | '))
+                for l in lines if isinstance(lines, list) else [txt]:
+                    self._log('  ' + l)
+                self._log('>>> Конверт равкодов: ' + ('готово' if ok else 'НЕ УДАЛОСЬ'),
+                          'ok' if ok else 'err')
+            self.after(0, upd)
+        import threading
+        threading.Thread(target=work, daemon=True).start()
+
+    def _cleanup_select_all(self, tree):
+        tree.selection_set(tree.get_children())
+
+    def _cleanup_filter(self, tree, q):
+        q = (q or '').strip().lower()
+        all_iids = getattr(self, '_cleanup_all_iids', None)
+        if all_iids is None:
+            all_iids = tree.get_children()
+            self._cleanup_all_iids = list(all_iids)
+        for iid in self._cleanup_all_iids:
+            if not tree.exists(iid):
+                continue
+            vals = tree.item(iid, 'values')
+            text = ' '.join(str(v) for v in vals).lower()
+            if q and q not in text:
+                tree.detach(iid)
+            else:
+                tree.reattach(iid, '', 'end')
+
+    def _repair_main(self):
+        self._repair_tables(self.e_tgt)
+
+    def _cleanup_open_log(self):
+        p = os.path.join(HERE, 'logs')
+        if os.path.isdir(p):
+            fs = sorted([f for f in os.listdir(p) if f.startswith('cleanup-')])
+            if fs:
+                os.startfile(os.path.join(p, fs[-1]))
+            else:
+                messagebox.showinfo('Лог', 'Логов чистки пока нет.')
+        else:
+            messagebox.showinfo('Лог', 'Папки logs ещё нет.')
+
+
+if __name__ == '__main__':
+    app = App()
+    app.mainloop()
