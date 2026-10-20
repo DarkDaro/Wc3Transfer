@@ -200,42 +200,120 @@ def main():
     entry_name = deploy_to
     if os.path.exists(cat_p0):
         cat0 = io.open(cat_p0, 'rb').read().decode('utf-8', errors='replace')
-        m0 = re.search(r"^'(\d{3}-" + re.escape(deploy_to) + r")':", cat0, re.M)
+        # 20.10 (фикс дым-теста): кавычки опциональны. Наш kv() пишет
+        # ключи вида 213-LIA БЕЗ кавычек (need_q=False) — прежний regex
+        # с обязательными кавычками на повторном прогоне entry не видел,
+        # и файлы переезжали из <NNN-dep> в <dep> (purge+перекат).
+        m0 = re.search(r"^'?(\d{3}-" + re.escape(deploy_to) + r")'?:", cat0, re.M)
         if m0:
             entry_name = m0.group(1)
-    keep = set()
-    old_m = deploy_manifest.load_manifest(cfgp)
-    if old_m:    # 20.09 fix №6: dry выходит return-ом выше — not dry мёртвое
+
+    # 20.10: раскладка триггеров. Редактор триггеров НЕ поддерживает
+    # вложенные папки, зато НЕ против нескольких папок верхнего уровня.
+    # Прежняя раскладка сваливала весь импорт в <entry>\ : подпапка донора
+    # превращалась в префикс имени файла — визуально одна папка-свалка.
+    # Режим 'folders': каждая папка триггеров донора -> СВОЯ папка
+    # верхнего уровня trigger\<имя донора>\ (имя сохраняется 1:1);
+    # корень донора / code-split / монолит идут в <entry>\ как раньше.
+    # 'flat' — прежняя раскладка (по умолчанию, обратная совместимость).
+    folders_mode = cfg['code'].get('folders', 'flat')
+
+    def _adj_name(folder):
+        # вложенные уровни донора в ИМЕНИ файла запрещены ОС
+        # ('a\b 1-x.j' на Windows — это папка 'a'), заменяю sep на '_'
+        return folder.replace(os.sep, '_') if folder else ''
+
+    warped_warned = set()
+
+    def _dst(p):
+        # 20.10: ЕДИНОЕ правило раскладки (раньше keep и запись дублировали
+        # логику вручную и при смене раскладки разъезжались).
+        # Возвращает путь от tgt (os.sep).
+        base = os.path.basename(p)
+        if base == 'war3map.j' and 'trigger' not in os.path.relpath(p, src):
+            # 20.09 fix №1: монолит — явный путь <entry>\war3map.j
+            return os.path.join('trigger', entry_name, 'war3map.j')
+        if 'code-split' in p:
+            return os.path.join('trigger', entry_name, 'code-split ' + base)
+        rel_t = os.path.relpath(p, trig_src)
+        folder = os.path.dirname(rel_t)
+        if not folder or folder == '.':
+            # корневой файл донора (не code.j — он в header)
+            return os.path.join('trigger', entry_name, base)
+        if os.sep in folder or '/' in folder:
+            # вложенность донора в folders-режиме тоже плоским именем:
+            # редактор вложенность не умеет
+            if folder not in warped_warned:
+                warped_warned.add(folder)
+                print('ВНИМАНИЕ: вложенная папка донора', folder,
+                      '-> плоское имя с "_" (редактор не умеет вложенность)')
+            folder = _adj_name(folder)
+        if folders_mode == 'folders' and folder not in FOREIGN:
+            return os.path.join('trigger', folder, base)
+        return os.path.join('trigger', entry_name, folder + ' ' + base)
+
+    def _dst_gui(lml_p):
+        # 20.10: GUI-пары (.lml+.txt) по тем же правилам раскладки
+        rel_t = os.path.relpath(lml_p, trig_src)
+        folder = os.path.dirname(rel_t)
+        base = os.path.splitext(os.path.basename(lml_p))[0]
+        if not folder or folder == '.':
+            return os.path.join('trigger', entry_name, base + '.lml')
+        if os.sep in folder or '/' in folder:
+            folder = _adj_name(folder)
+        if folders_mode == 'folders' and folder not in FOREIGN:
+            return os.path.join('trigger', folder, base + '.lml')
+        return os.path.join('trigger', entry_name, folder + ' ' + base + '.lml')
+
+    # 20.10 (фикс дым-теста): FOREIGN определяем ЗАРАНЕЕ — _dst/_dst_gui
+    # ссылаются на него, а folder_keys прогоняет _dst по всем файлам.
+    # Ниже только МУТИРУЕМ (.add), не перепривязываем.
+    FOREIGN = set()
+
+    # 20.10: ключи каталога нового прогона (папки деплоя) — для keep_e
+    def _folder_keys():
+        ks = set()
         for p in files:
-            # 20.09 fix №1: монолит war3map.j — relpath от trig_src даёт
-            # '..\map\...' → файл уезжал в КОРЕНЬ trigger/ мимо папки деплоя.
-            # Явный путь: <entry>\war3map.j
-            if os.path.basename(p) == 'war3map.j' and 'trigger' not in os.path.relpath(p, src):
-                keep.add(os.path.join('trigger', entry_name, 'war3map.j').replace(os.sep, '/'))
-                continue
-            rel = os.path.relpath(p, trig_src)
-            folder = os.path.dirname(rel)
-            if 'code-split' in p:
-                keep.add(os.path.join('trigger', entry_name,
-                                      'code-split ' + os.path.basename(p)).replace(os.sep, '/'))
-            elif folder and folder != '.':
-                keep.add(os.path.join('trigger', entry_name,
-                                      folder + ' ' + os.path.basename(p)).replace(os.sep, '/'))
-            else:
-                keep.add(os.path.join('trigger', entry_name, os.path.basename(p)).replace(os.sep, '/'))
-        # 21.09 фикс D: GUI-пары тоже в keep (плоское имя, как у .j)
+            parts = _dst(p).split(os.sep)
+            if len(parts) >= 3 and parts[1] != entry_name:
+                ks.add(parts[1])
+        return ks
+
+    folder_keys = _folder_keys()
+
+    # 20.10: FOREIGN — папки приёмника, имя которых совпало с папкой
+    # донора, но которые утилита НЕ записывала (нативный контент).
+    # Файлы такой папки донора пойдут плоско в <entry> — без подмешивания.
+    old_m = deploy_manifest.load_manifest(cfgp)
+    old_files = set((old_m or {}).get('files') or [])
+    if folders_mode == 'folders':
+        for fk in sorted(folder_keys):
+            dk = os.path.join(tgt, 'trigger', fk)
+            ours = any(rel.startswith('trigger/' + fk + '/') for rel in old_files)
+            if os.path.isdir(dk) and os.listdir(dk) and not ours:
+                FOREIGN.add(fk)
+                print('ВНИМАНИЕ: папка', fk, 'уже есть в приёмнике и не записана утилитой',
+                      '— файлы этой папки донора пойдут плоско в <entry>')
+        if FOREIGN:
+            # fallback-файлы ушли в <entry> — пересчёт ключей каталога
+            folder_keys = _folder_keys()
+    keep = set()
+    if old_m:    # 20.09 fix №6: dry выходит return-ом выше — not dry мёртвое
+        # 20.10: keep по тем же правилам (_dst/_dst_gui), что и запись —
+        # раньше правило дублировалось вручную и расползалось
+        for p in files:
+            keep.add(_dst(p).replace(os.sep, '/'))
+        # 21.09 фикс D: GUI-пары тоже в keep (.txt — спутник .lml)
         for lml_p, txt_p in gui_pairs:
-            rel = os.path.relpath(lml_p, trig_src)
-            folder = os.path.dirname(rel)
-            base = os.path.splitext(os.path.basename(rel))[0]
-            flat = (folder + ' ' + base) if folder and folder != '.' else base
-            keep.add(os.path.join('trigger', entry_name, flat + '.lml').replace(os.sep, '/'))
+            d = _dst_gui(lml_p).replace(os.sep, '/')
+            keep.add(d)
             if txt_p:
-                keep.add(os.path.join('trigger', entry_name, flat + '.txt').replace(os.sep, '/'))
+                keep.add(d[:-4] + '.txt')
         # 20.09: keep_e — ключи записей каталога нового прогона.
         # Даже если запись \d{3}-X уже есть (cat_add не добавит),
         # purge не должен сносить её: deploy_to и entry_name живут.
-        keep_e = {deploy_to, entry_name}
+        # 20.10: + папки донора (режим folders)
+        keep_e = {deploy_to, entry_name} | folder_keys
         removed, warns = deploy_manifest.purge(cfgp, tgt, keep=keep, keep_e=keep_e)
         for w in warns:
             print(w)
@@ -295,36 +373,16 @@ def main():
             s2 = re.sub(r'gg_unit_([A-Za-z0-9]{4})_\w+', _gg_null, s2)
 
         if True:
-            # 18.09 (v6): редактор НЕ поддерживает подпапки!
-            # Все файлы донора -> ПЛОСКО в <entry>\ ,
-            # подпапка = префикс имени файла:
-            #   trigger\14-Шандрис\1-ShotMaster.j
-            #   -> 213-FW\14-Шандрис - Лучница 1-ShotMaster.j
-            # code-split\ -> <entry>\code-split <имя>.j
-            # 20.09 fix №1: монолит — явный dst в папке деплоя
-            if os.path.basename(p) == 'war3map.j' and 'trigger' not in os.path.relpath(p, src):
-                dst = os.path.join(dst_dir, 'war3map.j')
-            elif 'code-split' in p:
-                dst = os.path.join(dst_dir, 'code-split ' + os.path.basename(p))
-            else:
-                rel = os.path.relpath(p, trig_src)
-                folder = os.path.dirname(rel)
-                if folder and folder != '.':
-                    # подпапка донора -> префикс в имени файла
-                    # 20.09 fix: os.walk уже спустился в подпапку —
-                    # relpath от trig_src даёт '01-Main', но p сам
-                    # содержит '01-Main' в пути от os.walk(root=подпапка)?
-                    # Нет: p = trig_src/01-Main/1-alpha.j, rel='01-Main/1-alpha.j'.
-                    # Двойной префикс был из-за walk по cs + trig_src.
-                    dst = os.path.join(dst_dir, folder + ' ' + os.path.basename(p))
-                else:
-                    # корневой файл донора (не code.j — он в header)
-                    dst = os.path.join(dst_dir, os.path.basename(p))
+            # 20.10: раскладка общим правилом _dst — flat (префикс папки в
+            # имени файла, всё в <entry>) или folders (папка донора -> своя
+            # папка верхнего уровня trigger\). Монолит/code-split — в <entry>.
+            dst = os.path.join(tgt, _dst(p))
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             io.open(dst, 'wb').write(s2.encode('utf-8'))
             written.append(os.path.relpath(dst, tgt).replace(os.sep, '/'))
             n += 1
-    print('файлов с заменами записано:', n, '->', deploy_to)
+    print('файлов с заменами записано:', n,
+          ('-> ' + deploy_to) if folders_mode == 'flat' else '(раскладка по папкам донора)')
     # 21.09: отчёт null-конверта
     if null_hits:
         print('битых gg_unit -> null: %d переменных (%d типов)' % (len(null_hits), len({h[8:12] for h in null_hits})))
@@ -343,18 +401,15 @@ def main():
     # к .lml не применяется: тела GUI генерит редактор.
     n_gui = 0
     for lml_p, txt_p in gui_pairs:
-        rel = os.path.relpath(lml_p, trig_src)
-        folder = os.path.dirname(rel)
-        base = os.path.splitext(os.path.basename(rel))[0]
-        flat = (folder + ' ' + base) if folder and folder != '.' else base
-        io.open(os.path.join(dst_dir, flat + '.lml'), 'wb').write(
-            io.open(lml_p, 'rb').read())
-        written.append(os.path.relpath(os.path.join(dst_dir, flat + '.lml'), tgt).replace(os.sep, '/'))
+        # 20.10: раскладка общим правилом _dst_gui (flat/folders)
+        d = os.path.join(tgt, _dst_gui(lml_p))
+        io.open(d, 'wb').write(io.open(lml_p, 'rb').read())
+        written.append(os.path.relpath(d, tgt).replace(os.sep, '/'))
         n_gui += 1
         if txt_p:
-            io.open(os.path.join(dst_dir, flat + '.txt'), 'wb').write(
-                io.open(txt_p, 'rb').read())
-            written.append(os.path.relpath(os.path.join(dst_dir, flat + '.txt'), tgt).replace(os.sep, '/'))
+            dtxt = d[:-4] + '.txt'    # спутник .lml — рядом с ним
+            io.open(dtxt, 'wb').write(io.open(txt_p, 'rb').read())
+            written.append(os.path.relpath(dtxt, tgt).replace(os.sep, '/'))
     if n_gui:
         print('GUI-триггеров (пары .lml+.txt) перенесено:', n_gui)
 
@@ -545,7 +600,11 @@ def main():
             if os.path.exists(cat_src_p):
                 donor_flags = cat_parse_flags(
                     io.open(cat_src_p, 'rb').read().decode('utf-8', errors='replace'))
-            out = [kv(entry_name, disp_of(entry_name), '')]
+            # 20.10: секции каталога по факту РЕАЛЬНОЙ раскладки (written).
+            # flat — одна секция entry_name; folders — отдельная секция на
+            # каждую папку донора. Инцидент автодописки не повторяем:
+            # пишем ТОЛЬКО свои секции, приёмник не сканируем.
+            groups = {}      # секция -> [(запись, ключ флагов донора)]
             for rel in sorted(written):
                 # 20.09 fix №4: header-файл (file-режим) в секцию не пишем —
                 # его запись уже стоит top-level перед разделителем
@@ -555,24 +614,44 @@ def main():
                 # каталога, это спутник .lml; запись уже добавлена с .lml
                 if rel.endswith('.txt'):
                     continue
-                base = os.path.splitext(os.path.basename(rel))[0]
-                # '01-Main 1-notepad.j' -> под ключом '01-Main 1-notepad'
-                out.append(kv(base, disp_of(base), '    '))
-                # 21.09 фикс C: флаги донора под записью (8-индент)
-                for fl in donor_flags.get(base, []):
-                    out.append('        ' + fl)
-            section = chr(10).join(out) + chr(10)
-            # purge старой секции: от разделителя entry_name до следующей
-            # записи верхнего уровня (или конца файла)
-            # 20.09 fix №2: чистим по ОБОИМ ключам — deploy_to (писали раньше)
-            # и entry_name (пишем теперь), при смене нумерации старая
-            # секция не должна оставаться.
-            for sec_key in {deploy_to, entry_name}:
-                pat = re.compile(r"^'?" + re.escape(sec_key) + r"'?:[^\n]*\n(?:(?:    [^\n]*)\n)*", re.M)
-                cat = pat.sub('', cat, count=1)
-            cat2 = cat.rstrip() + chr(10) + section
-            io.open(cat_p, 'wb').write(cat2.encode('utf-8'))
-            print('catalog.lml: своя секция %s (%d строк: разделитель + %d файлов)' % (deploy_to, len(out), len(out) - 1))
+                parts = rel.split('/')
+                if len(parts) != 3 or parts[0] != 'trigger':
+                    continue    # страховка: ждём trigger/<секция>/<файл>
+                _, sec, stem = parts[0], parts[1], os.path.splitext(parts[2])[0]
+                # 21.09 фикс C: флаги берём из каталога донора по плоскому
+                # ключу 'папка запись'. В flat префикс папки уже В имени
+                # файла (совпадает с донорским ключом), в folders имя
+                # записи чистое — собираем ключ из секции+записи.
+                fkey = stem if (folders_mode != 'folders' or sec == entry_name) \
+                    else sec + ' ' + stem
+                groups.setdefault(sec, []).append((stem, fkey))
+            if not groups:
+                print('catalog.lml: записей для секций нет — пропускаю')
+            else:
+                # порядок секций: entry_name (разделитель), потом папки донора
+                secs = []
+                for sec in ([entry_name] if entry_name in groups else []) + \
+                        sorted(k for k in groups if k != entry_name):
+                    out = [kv(sec, disp_of(sec), '')]
+                    for stem, fkey in groups[sec]:
+                        # 20.09 fix №10: значение = ИМЯ ТРИГГЕРА (после номера),
+                        # InitTrig_<значение> линкуется с кодом
+                        out.append(kv(stem, disp_of(stem), '    '))
+                        # 21.09 фикс C: флаги донора под записью (8-индент)
+                        for fl in donor_flags.get(fkey, []):
+                            out.append('        ' + fl)
+                    secs.append((sec, chr(10).join(out) + chr(10)))
+                # purge старых секций: наши ключи + deploy_to/entry_name
+                # (смена нумерации/режима не оставляет старые)
+                for sec_key in {deploy_to, entry_name} | set(groups):
+                    pat = re.compile(r"^'?" + re.escape(sec_key) + r"'?:[^\n]*\n(?:(?:    [^\n]*)\n)*", re.M)
+                    cat = pat.sub('', cat, count=1)
+                cat2 = cat.rstrip() + chr(10) + chr(10).join(t for _, t in secs)
+                io.open(cat_p, 'wb').write(cat2.encode('utf-8'))
+                cat_added.extend(sec for sec, _ in secs)
+                print('catalog.lml: секций %d, записей %d (%s)' % (
+                    len(secs), len(groups) and sum(len(v) for v in groups.values()),
+                    'flat' if folders_mode == 'flat' else 'папки донора'))
         else:
             print('catalog.lml не найден в приёмнике — пропускаю')
 
@@ -588,7 +667,10 @@ def main():
             # purge следующего прогона обязан снести запись каталога
             # при смене deploy_to (разделитель пишет автодописка ИЛИ
             # он уже есть от прошлого деплоя — в обоих случаях он наш).
-            'catalog_entries': sorted(set(cat_added) | {deploy_to, entry_name}),
+            # 20.10: + ключи папок донора (folders) — purge следующего
+            # прогона удалит их из каталога при смене режима/набора папок
+            'catalog_entries': sorted(set(cat_added) | {deploy_to, entry_name}
+                                      | set(folder_keys)),
             'header_block': locals().get('header_block_name'),
         }
         deploy_manifest.merge_section(cfgp, 'code', m)

@@ -62,7 +62,7 @@ python transfer_run.py --config X.json   # другой конфиг (друга
 | `deps` | граф зависимостей от корней (`deps.roots`): способности→баффы→эффекты/иконки→предметы | `deps_result.json` |
 | `tables` | перенос секций `[ID]` ini-таблиц с новыми ID; `_parent` мапится, равкоды в abilList/buffList заменяются | `table/*.ini` приёмника |
 | `import` | копирование ассетов (resource/sound): нет → копировать; байт-в-байт → пропуск; конфликт → `<имя>_v2` + подмена пути | файлы приёмника + `assets_renamed` в deps_result |
-| `code` | перенос папок триггеров донора (`deploy_to`) с заменой литералов `'Xyyy'` по маппингу; шапка донора (header append); обновление catalog.lml; null-конверт битых gg_unit | `trigger/<deploy_to>/*.j`, `code.j`, `catalog.lml` |
+| `code` | перенос папок триггеров донора (`deploy_to`) с заменой литералов `'Xyyy'` по маппингу; шапка донора (header append); обновление catalog.lml; null-конверт битых gg_unit. Раскладка `code.folders`: `flat` — всё в `<entry>` (папка донора = префикс имени файла), `folders` — каждая папка донора → своя папка верхнего уровня `trigger\` (редактор не умеет вложенность, но не против нескольких папок; чужие/вложенные имена — с предупреждением): `trigger/<folder>/*.j` | `trigger/<deploy_to>/*.j`, `code.j`, `catalog.lml` |
 | `code_cut` | вырезка функций героя из монолита war3map.j донора (BFS по вызовам), для карт без исходника; опция `auto_expand` | `cut_heroes.j` + отчёт |
 | `globals` | перенос блока globals из war3map.j донора; `gg_*` выкидываются; имя+тип совпали → пропуск, тип разный → блокировка | `<entry>-Globals.j` + catalog.lml |
 | `geometry` | вставка декора/юнитов в war3map.doo/Units.doo со смещением; авто-подбор по воде если offset=null | `map/*.doo` |
@@ -110,7 +110,7 @@ B-литералы (баффы `'Bxxx'`) в этапе code заменяются
 - `source` / `target` / `name` — пара карт и подпись;
 - `tables` / `skip_tables` — какие ini переносим (unit/ability/buff/item/upgrade), w3i+misc не трогаем;
 - `import` — copy_dirs (resource/sound), exclude_paths (UI, loadingscreen, minimap...), check_missing_refs, allow_override;
-- `code` — deploy_to (имя папки триггеров в приёмнике), include_monolith, allow_b, only_dirs, header_mode (append), func_prefix, update_catalog, null_broken_gguits;
+- `code` — deploy_to (имя папки триггеров в приёмнике), folders (раскладка flat/folders), include_monolith, allow_b, only_dirs, header_mode (append), func_prefix, update_catalog, null_broken_ggunit'ы;
 - `geometry` — enabled, offset [dx,dy], recount_z;
 - `testspawn` — enabled, heroes (пусто = все из deps), items, rect;
 - `mapping` — mode (smart/replace_std/custom_only), prebuilt_dir (ОБЯЗАТЕЛЬНО задавать! источник истины «что стандарт»), case_conflict_check, duplicate_name_check;
@@ -182,6 +182,10 @@ B-литералы (баффы `'Bxxx'`) в этапе code заменяются
   при добавлении вывода в stage-скрипты формат `=== ЭТАПЫ: N` трогать нельзя
   (прогресс-бар парсит).
 - Комментарии в коде — с датой (`# ДД.ММ:`), конвенция проекта, сохранять.
+- 20.10: `stage_code.py` пишет ключи каталога БЕЗ кавычек (`213-LIA:`), а
+  `entry_name`-regex допускает и то, и другое (латентный «переезд» записи
+  из `<NNN-dep>` в `<dep>` при повторных прогонах — исправлен дым-тестом).
+  В live-каталогах редактора ключи кавыченные — оба вида читаются.
 
 ## 11. История и контекст
 

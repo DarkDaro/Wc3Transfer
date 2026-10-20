@@ -1,6 +1,6 @@
 # 18.09: GUI для утилиты переноса — CustomTkinter (переписан с transfer_gui.py, поведение 1-в-1)
 # Запуск: Утилита переноса.bat (pythonw)
-import io, os, sys, json, subprocess, threading, queue
+import io, os, sys, json, re, subprocess, threading, queue   # 20.10: +re — был NameError в _load_cfg (geometry глотался молча)
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import time
@@ -49,6 +49,13 @@ SHORT = {
 FONT = ("Segoe UI", 12)
 FONT_SMALL = ("Segoe UI", 11)
 FONT_MONO = ("Consolas", 10)
+
+# 20.10: единая палитра акцентов. Целерные литералы разъехались по окнам
+# (v7 ab(), trigclean, cleanup, deob, rawconv) — риск расползания оттенков.
+ACCENT   = "#3a7bd5"                        # акцент интерфейса (шапка, выделение)
+DANGER   = "#c0392b"; DANGER_H = "#96281b"  # боевые операции
+OKGREEN  = "#1e8e3e"; OKGREEN_H = "#156a2e" # успешные действия
+WARN     = "#b7791f"; WARN_H    = "#9a6a12" # предупреждение / демо-режим
 
 # тема из конфига до создания окна
 def _load_theme_name():
@@ -159,12 +166,15 @@ class App(ctk.CTk):
     # ---------- построение UI ----------
 
     def _card(self, parent, title):
-        """Карточка-секция с заголовком, возвращает inner."""
-        f = ctk.CTkFrame(parent, fg_color=("gray92", "gray14"), corner_radius=8)
+        """Карточка-секция с заголовком, возвращает inner.
+        20.10: мягкий радиус + тонкая рамка — карточки отделяются от фона."""
+        f = ctk.CTkFrame(parent, fg_color=("gray96", "gray13"),
+                         corner_radius=10, border_width=1,
+                         border_color=("gray86", "gray24"))
         ctk.CTkLabel(f, text=title, font=("Segoe UI", 12, "bold"),
-                     anchor="w").pack(fill="x", padx=12, pady=(8, 2))
+                     anchor="w").pack(fill="x", padx=12, pady=(10, 2))
         inner = ctk.CTkFrame(f, fg_color="transparent")
-        inner.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+        inner.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         return f, inner
 
     def _apply_mode(self):
@@ -197,7 +207,7 @@ class App(ctk.CTk):
         for b in (self.b_verify, self.b_cleanup, self.b_repair, self.b_trigclean, self.b_rawconv):
             try:
                 b.configure(border_width=2 if serv else 0,
-                            border_color="#2d5aa8" if serv else None)
+                            border_color=ACCENT if serv else None)
             except Exception:
                 pass
         # сохранить режим
@@ -207,24 +217,29 @@ class App(ctk.CTk):
         try:
             self.head_status.configure(
                 text='РЕЖИМ: ОБСЛУЖИВАНИЕ (только приёмник)' if serv else '',
-                text_color='#b7791f' if serv else None)
+                text_color=WARN if serv else None)
         except Exception:
             pass
 
     def _build(self):
-        # --- шапка ---
-        head = ctk.CTkFrame(self, fg_color=("gray80", "gray10"), height=44)
+        # --- шапка (20.10: приглушённая подпись + акцентная полоса) ---
+        head = ctk.CTkFrame(self, fg_color=("gray82", "gray8"), height=46)
         head.pack(fill="x")
+        ctk.CTkFrame(self, height=2, fg_color=ACCENT,
+                     corner_radius=0).pack(fill="x")   # 20.10: фирменная полоса
         ctk.CTkLabel(head, text="  Утилита переноса объектов",
                      font=("Segoe UI", 15, "bold")).pack(side="left", padx=8, pady=8)
-        ctk.CTkLabel(head, text="w3x2lni", font=FONT_SMALL).pack(side="left", padx=4)
+        ctk.CTkLabel(head, text="w3x2lni", font=FONT_SMALL,
+                     text_color=("gray45", "gray60")).pack(side="left", padx=4)
         self.head_status = ctk.CTkLabel(head, text="", font=FONT_SMALL)
         self.head_status.pack(side="right", padx=12)
 
+        # 20.10: подписи тем по-русски (в конфиг пишется light/dark)
+        self.THEME_RU = {"Светлая": "light", "Тёмная": "dark"}
         self.theme_seg = ctk.CTkSegmentedButton(
-            head, values=["light", "dark"], height=26,
+            head, values=list(self.THEME_RU), height=26,
             command=self._toggle_theme)
-        self.theme_seg.set(APPEARANCE)
+        self.theme_seg.set({"light": "Светлая", "dark": "Тёмная"}.get(APPEARANCE, "Тёмная"))
         self.theme_seg.pack(side="right", padx=(0, 12))
         for ch in self.theme_seg.winfo_children():
             try:
@@ -261,8 +276,9 @@ class App(ctk.CTk):
         mid = ctk.CTkFrame(self, fg_color="transparent")
         mid.pack(fill="both", expand=True, padx=10, pady=4)
 
-        # левая колонка: этапы
-        left = ctk.CTkFrame(mid, fg_color=("gray92", "gray14"), corner_radius=8)
+        # левая колонка: этапы (20.10: карточный стиль как у остальных секций)
+        left = ctk.CTkFrame(mid, fg_color=("gray96", "gray13"), corner_radius=10,
+                            border_width=1, border_color=("gray86", "gray24"))
         left.pack(side="left", fill="y", padx=(0, 6), pady=4)
         ctk.CTkLabel(left, text="2. Этапы", font=("Segoe UI", 12, "bold"),
                      anchor="w").pack(fill="x", padx=12, pady=(8, 2))
@@ -407,6 +423,22 @@ class App(ctk.CTk):
         Tooltip(self.e_deploy, "Имя записи каталога приёмника, куда пишется код\n"
                 "(папка на диске = имя записи 1:1, как 213-FW).\n"
                 "Меняй только для переноса в другую запись!")
+        # 20.10: раскладка папок триггеров (редактор не умеет вложенность)
+        ctk.CTkLabel(gi2, text="Раскладка папок триггеров:", font=FONT_SMALL,
+                     anchor="w").pack(fill="x", pady=(8, 0))
+        self.folders_seg = ctk.CTkSegmentedButton(
+            gi2, values=["Одна папка", "Папки как у донора"], height=28,
+            command=lambda v: None)
+        self.folders_seg.set("Одна папка")
+        self.folders_seg.pack(fill="x", pady=(2, 4))
+        Tooltip(self.folders_seg,
+                "Одна папка — весь импорт в запись deploy_to (213-FW\\),\n"
+                "папка донора = префикс имени файла. Как раньше.\n"
+                "Папки как у донора — каждая папка триггеров донора получает\n"
+                "СВОЮ папку верхнего уровня trigger\\ (имя сохраняется 1:1):\n"
+                "в редакторе видно структуру, а не одна папка-свалка.\n"
+                "Корень донора, code-split и монолит всегда идут в deploy_to.\n"
+                "Смена режима чистит старое по манифесту деплоя.")
         # 19.09 (v6): галочки каталога и монолита
         self.v_updcatalog = tk.BooleanVar(value=True)
         c10 = ctk.CTkCheckBox(gi2, text="Обновлять catalog.lml приёмника", variable=self.v_updcatalog,
@@ -470,14 +502,14 @@ class App(ctk.CTk):
             if w:
                 kw['width'] = w
             if color == 'danger':
-                kw['fg_color'] = "#c0392b"
-                kw['hover_color'] = "#96281b"
+                kw['fg_color'] = DANGER
+                kw['hover_color'] = DANGER_H
             elif color == 'ok':
-                kw['fg_color'] = "#1e8e3e"
-                kw['hover_color'] = "#156a2e"
+                kw['fg_color'] = OKGREEN
+                kw['hover_color'] = OKGREEN_H
             elif color == 'warn':
-                kw['fg_color'] = "#b7791f"
-                kw['hover_color'] = "#9a6a12"
+                kw['fg_color'] = WARN
+                kw['hover_color'] = WARN_H
             # 19.09 (v7-fix): cmd НЕ привязывался — кнопки
             # были кликабельны визуально, но command=None
             b = ctk.CTkButton(parent, text=text, height=32, font=FONT_SMALL,
@@ -566,9 +598,9 @@ class App(ctk.CTk):
         self.prog_labels = {}
         for s in STAGES:
             lbl = ctk.CTkLabel(row, text=" " + SHORT.get(s, STAGE_LABELS[s]) + " ",
-                               font=("Segoe UI", 10), corner_radius=6,
-                               fg_color=("gray85", "gray20"),
-                               text_color=("gray40", "gray60"))
+                               font=("Segoe UI", 10), corner_radius=10,
+                               fg_color=("gray88", "gray18"),
+                               text_color=("gray35", "gray62"))
             lbl.pack(side="left", padx=1)
             self.prog_labels[s] = lbl
         Tooltip(pf, "Прогресс привязан к паре карт: смена источника/приёмника\nавтоматически сбрасывает список пройденных этапов.\nНесколько конфигов = независимые прогоны (свой state у каждого).")
@@ -601,7 +633,7 @@ class App(ctk.CTk):
                            bg="#12151a" if dark else "#1e1e1e",
                            fg="#c8d0da" if dark else "#d4d4d4",
                            insertbackground="#e8edf4" if dark else "#ffffff",
-                           selectbackground="#2d5aa8", selectforeground="#ffffff")
+                           selectbackground=ACCENT, selectforeground="#ffffff")
         log_sb = ctk.CTkScrollbar(log_wrap, command=self.log.yview)
         self.log.configure(yscrollcommand=log_sb.set)
         log_sb.pack(side="right", fill="y")
@@ -644,6 +676,8 @@ class App(ctk.CTk):
     # ---------- тема ----------
 
     def _toggle_theme(self, value):
+        # 20.10: сегмент теперь с русскими подписями — переводим в light/dark
+        value = self.THEME_RU.get(value, value)
         global APPEARANCE
         APPEARANCE = value
         ctk.set_appearance_mode(value)
@@ -837,6 +871,9 @@ class App(ctk.CTk):
             cfg['code']['deploy_to'] = dep
         cfg['code']['update_catalog'] = True if self.v_updcatalog.get() else None
         cfg['code']['include_monolith'] = self.v_monolith.get()
+        # 20.10: раскладка папок триггеров — конфиг↔UI вместе
+        cfg['code']['folders'] = 'folders' if \
+            self.folders_seg.get() == 'Папки как у донора' else 'flat'
         # 21.09: null-конверт битых gg_unit — конфиг↔UI вместе
         cfg.setdefault('code', {})['null_broken_gguits'] = self.v_ggnul.get()
         cfg.setdefault('gui', {})['sound_on_done'] = self.v_sound.get()
@@ -894,6 +931,10 @@ class App(ctk.CTk):
         uc = self.cfg.get('code', {}).get('update_catalog')
         self.v_updcatalog.set(True if uc is None else bool(uc))
         self.v_monolith.set(self.cfg.get('code', {}).get('include_monolith', False))
+        # 20.10: раскладка папок триггеров — восстановление из конфига
+        self.folders_seg.set('Папки как у донора' if
+            self.cfg.get('code', {}).get('folders', 'flat') == 'folders'
+            else 'Одна папка')
         # 21.09: null-конверт битых gg_unit — восстановление из конфига
         self.v_ggnul.set(self.cfg.get('code', {}).get('null_broken_gguits', True))
         self.t_excl.delete('1.0', 'end')
@@ -1127,7 +1168,7 @@ class App(ctk.CTk):
                         fieldbackground="#181b21" if dark else "#ffffff",
                         foreground="#e8edf4" if dark else "#1a1a1a",
                         font=('Segoe UI', 10), rowheight=24, borderwidth=0)
-        style.map('TrigClean.Treeview', background=[('selected', '#2d5aa8')],
+        style.map('TrigClean.Treeview', background=[('selected', ACCENT)],
                   foreground=[('selected', '#ffffff')])
         style.configure('TrigClean.Treeview.Heading', font=('Segoe UI', 10, 'bold'),
                         background="#262b33" if dark else "#e3e8ef",
@@ -1164,14 +1205,14 @@ class App(ctk.CTk):
         Tooltip(b_scan, 'ШАГ 1. Искать мусор (~1-3 мин на большую карту).\nРезультат появится в списке.')
         b_del = ctk.CTkButton(btns, text='2. УДАЛИТЬ ВЫДЕЛЕННОЕ', height=36,
                               font=("Segoe UI", 12, "bold"),
-                              fg_color="#1e8e3e", hover_color="#156a2e",
+                              fg_color=OKGREEN, hover_color=OKGREEN_H,
                               command=lambda: self._trigclean_delete(e_dir, lbl))
         b_del.pack(side='left', padx=3, pady=2)
         Tooltip(b_del, 'ШАГ 2. Удалить отмеченные строки.\nПодтверждение + бэкап (включая catalog.lml и variable.lml).')
         # 19.09 (вечер): ДЕМО — что будет удалено, без записи
         b_demo = ctk.CTkButton(btns, text='ДЕМО (без записи)', height=36,
                                font=("Segoe UI", 11),
-                               fg_color="#b7791f", hover_color="#8a5a13",
+                               fg_color=WARN, hover_color=WARN_H,
                                command=lambda: self._trigclean_delete(e_dir, lbl, dry=True))
         b_demo.pack(side='left', padx=3, pady=2)
         Tooltip(b_demo, 'ПОКАЗАТЬ что будет удалено — БЕЗ записи в карту\nи без бэкапа. Пишет лог (logs/triggers-дата-demo.md)\nи открывает его. Безопасно.')
@@ -1388,7 +1429,7 @@ class App(ctk.CTk):
                         font=('Consolas', 11), activestyle='none',
                         bg="#181b21" if APPEARANCE == 'dark' else "#ffffff",
                         fg="#e8edf4" if APPEARANCE == 'dark' else "#1a1a1a",
-                        selectbackground="#2d5aa8", selectforeground="#ffffff",
+                        selectbackground=ACCENT, selectforeground="#ffffff",
                         borderwidth=0, highlightthickness=0)
         sb = ctk.CTkScrollbar(ti, command=lb.yview)
         lb.configure(yscrollcommand=sb.set)
@@ -1426,7 +1467,7 @@ class App(ctk.CTk):
             self._run([['--stage', 'code'], ['--stage', 'verify']])
 
         ctk.CTkButton(btns, text='ПЕРЕНЕСТИ ВЫБРАННЫЕ', height=36,
-                      fg_color="#1e8e3e", hover_color="#156a2e",
+                      fg_color=OKGREEN, hover_color=OKGREEN_H,
                       command=do_transfer).pack(side='left', padx=8)
         ctk.CTkButton(btns, text='Закрыть', height=30,
                       command=win.destroy).pack(side='right', padx=3)
@@ -1528,7 +1569,7 @@ class App(ctk.CTk):
                         fieldbackground="#181b21" if dark else "#ffffff",
                         foreground="#e8edf4" if dark else "#1a1a1a",
                         font=('Segoe UI', 10), rowheight=24, borderwidth=0)
-        style.map('Clean.Treeview', background=[('selected', '#2d5aa8')],
+        style.map('Clean.Treeview', background=[('selected', ACCENT)],
                   foreground=[('selected', '#ffffff')])
         style.configure('Clean.Treeview.Heading', font=('Segoe UI', 10, 'bold'),
                         background="#262b33" if dark else "#e3e8ef",
@@ -1561,20 +1602,20 @@ class App(ctk.CTk):
         Tooltip(b_scan, 'ШАГ 1. Искать мусор в карте.\nРезультат появится в списке ниже.')
         b_del = ctk.CTkButton(btns, text='2. УДАЛИТЬ ВЫДЕЛЕННОЕ', height=36,
                               font=("Segoe UI", 12, "bold"),
-                              fg_color="#1e8e3e", hover_color="#156a2e",
+                              fg_color=OKGREEN, hover_color=OKGREEN_H,
                               command=lambda: self._cleanup_delete(e_dir))
         b_del.pack(side='left', padx=3, pady=2)
         Tooltip(b_del, 'ШАГ 2. Удалить отмеченные в списке строки.\nСпросит подтверждение, сделает бэкап.')
         # 19.09 (вечер): ДЕМО — что будет удалено, без записи
         b_demo = ctk.CTkButton(btns, text='ДЕМО (без записи)', height=36,
                                font=("Segoe UI", 11),
-                               fg_color="#b7791f", hover_color="#8a5a13",
+                               fg_color=WARN, hover_color=WARN_H,
                                command=lambda: self._cleanup_delete(e_dir, dry=True))
         b_demo.pack(side='left', padx=3, pady=2)
         Tooltip(b_demo, 'ПОКАЗАТЬ какие объекты будут удалены —\nБЕЗ записи в таблицы и без бэкапа.\nПишет лог (logs/cleanup-дата-demo.md) и открывает его.')
         b_rep = ctk.CTkButton(btns, text='ПОЧИНИТЬ ТАБЛИЦЫ', height=36,
                               font=("Segoe UI", 12, "bold"),
-                              fg_color="#b7791f", hover_color="#9a6a12",
+                              fg_color=WARN, hover_color=WARN_H,
                               command=lambda: self._repair_tables(e_dir))
         b_rep.pack(side='left', padx=(10, 3), pady=2)
         Tooltip(b_rep, 'Авто-починка table/*.ini: self-parent (родитель = сам себе),\nбитые _parent -> дефолт типа, дубли секций, разбаланс [=[ ]=].\nПервый запуск = скан, повторный = починка (бэкап + лог).')
@@ -1784,7 +1825,7 @@ class App(ctk.CTk):
         Tooltip(b_scan, 'Прогон deob.py во временную папку — вход НЕ трогается.\nПоказывает: число функций/глобалов, переименований, VERIFY-статус.')
         b_run = ctk.CTkButton(btns, text='2. ПРИМЕНИТЬ', height=36,
                               font=("Segoe UI", 12, "bold"),
-                              fg_color="#1e8e3e", hover_color="#156a2e",
+                              fg_color=OKGREEN, hover_color=OKGREEN_H,
                               command=lambda: self._deob_apply(e_file, lbl))
         b_run.pack(side='left', padx=3, pady=2)
         Tooltip(b_run, "Деобфускация: выход <имя>_deobfuscated.j + rename_map.csv\nрядом с входом. Вход не изменяется.\nVERIFY: OK = токен-эквивалентность гарантирована.")
@@ -1944,7 +1985,7 @@ class App(ctk.CTk):
         Tooltip(b_scan, 'Найти скрипт(ы) и посчитать литералы выбранного режима. Без записи.')
         b_run = ctk.CTkButton(btns, text='2. КОНВЕРТИРОВАТЬ', height=36,
                               font=("Segoe UI", 12, "bold"),
-                              fg_color="#1e8e3e", hover_color="#156a2e",
+                              fg_color=OKGREEN, hover_color=OKGREEN_H,
                               command=lambda: self._rawconv_apply(e_dir, lbl, rc, v_mode, v_dir, v_to))
         b_run.pack(side='left', padx=3, pady=2)
         Tooltip(b_run, 'Заменить литералы выбранного режима на \'RAWC\' (base-256).\\nПеред записью — бэкап, лог замен рядом с файлом.')
