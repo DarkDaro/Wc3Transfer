@@ -1,0 +1,2 @@
+# 20.10: batch-файлы cmd.exe не работают с LF — только CRLF
+*.bat text eol=crlf
