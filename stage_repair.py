@@ -18,9 +18,12 @@ DEFAULT_PARENT = {
 }
 
 
-def load_std_ids():
+def load_std_ids(cfgp=None):
+    # 20.10: читаем конфиг, с которым запущены (мультиконфиг), а не
+    # всегда transfer_config.json рядом со скриптом.
     here = os.path.dirname(os.path.abspath(__file__))
-    cfgp = os.path.join(here, 'transfer_config.json')
+    if not cfgp:
+        cfgp = os.path.join(here, 'transfer_config.json')
     pb = ''
     if os.path.exists(cfgp):
         cfg = json.load(io.open(cfgp, 'rb'))
@@ -51,12 +54,38 @@ def load_std_ids():
     return std
 
 
-def repair(tgt, log_dir, backup_dir, do=True):
+def collect_ids(tgt):
+    """20.10: все ID секций во всех таблицах приёмника. Нужен, чтобы
+    не объявлять битым _parent, объявленный НИЖЕ по файлу или в
+    соседней таблице (раньше проверялось только `seen` сверху)."""
+    ids = set()
+    for t in TYPES:
+        p = os.path.join(tgt, 'table', t + '.ini')
+        if not os.path.exists(p):
+            continue
+        s = io.open(p, 'rb').read().decode('utf-8', errors='replace')
+        in_block = False
+        for l in s.splitlines():
+            if not in_block:
+                m = re.match(r'^\[([^\]]+)\]', l)
+                if m:
+                    ids.add(m.group(1))
+                if l.rstrip().endswith('[=['):
+                    in_block = True
+            elif ']=]' in l:
+                in_block = False
+    return ids
+
+
+def repair(tgt, log_dir, backup_dir, do=True, cfgp=None):
     """Возвращает (строки_отчёта, число_правок)."""
     stamp = time.strftime('%Y-%m-%d_%H%M%S')
     report = ['# Починка таблиц %s' % time.strftime('%Y-%m-%d %H:%M:%S'), '']
-    std = load_std_ids()
+    std = load_std_ids(cfgp)
+    all_ids = collect_ids(tgt)
     total = 0
+    if do:
+        os.makedirs(backup_dir, exist_ok=True)
     for t in TYPES:
         p = os.path.join(tgt, 'table', t + '.ini')
         if not os.path.exists(p):
@@ -130,7 +159,7 @@ def repair(tgt, log_dir, backup_dir, do=True):
                     # стандарта, [X] _parent=X) — ВАЛИДНЫЙ
                     # lni-формат. НЕ чинить! Битый = указывает
                     # на ДРУГОЙ несуществующий ID.
-                    if par and par != cur and par not in std and par not in seen:
+                    if par and par != cur and par not in std and par not in all_ids:
                         # родитель не стандартный и не в этой таблице
                         # (проверю по остальным таблицам позже — пока
                         # только если вообще нет нигде: заменю)
@@ -157,7 +186,12 @@ def repair(tgt, log_dir, backup_dir, do=True):
             report.append('## %s' % t)
             report.extend('- ' + f for f in fixed)
             if do:
-                shutil.copy(p, os.path.join(backup_dir, t + '.ini'))
+                # 20.10: папка бэкапа создаётся здесь же (GUI звал repair
+                # без предварительного makedirs), прошлый бэкап не затираем
+                dst = os.path.join(backup_dir, t + '.ini')
+                if os.path.exists(dst):
+                    dst = os.path.join(backup_dir, '%s-%s.ini' % (t, stamp))
+                shutil.copy(p, dst)
                 io.open(p, 'wb').write(('\n'.join(out) + '\n').encode('utf-8'))
     report.append('ИТОГО правок: %d%s' % (total, '' if do else ' (режим скана — ничего не писано)'))
     return report, total
@@ -171,7 +205,7 @@ if __name__ == '__main__':
     backup_dir = os.path.join(here, cfg['safety']['backup_dir'], 'repair')
     if do:
         os.makedirs(backup_dir, exist_ok=True)
-    report, total = repair(tgt, None, backup_dir, do=do)
+    report, total = repair(tgt, None, backup_dir, do=do, cfgp=sys.argv[1])
     for l in report:
         print(l)
     if do:

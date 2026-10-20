@@ -138,7 +138,7 @@ def main():
                 fields = {}
                 for l in secs[sid].splitlines():
                     m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$', l)
-                    if m and m.group(1) != '_parent':
+                    if m and m.group(1) != '_parent' and m.group(2).strip() != '[=[':
                         fields[m.group(1)] = m.group(2)
                 replace_std[(t, sid)] = fields
                 report_line = 'REPLACE-STD: %s:%s (вписать %d полей в стандарт)' % (t, sid, len(fields))
@@ -158,28 +158,19 @@ def main():
     # сохранить (17.09: пишем и в dry-run — маппинг это рабочая
     # папка утилиты, не приёмник; без записи tables в dry-run
     # берёт СТАРЫЙ маппинг и показывает мусор)
-    if True:
-        mp_json = os.path.join(here, cfg['mapping']['pkl'].replace('.pkl', '.json'))
-        io.open(mp_json, 'wb').write(json.dumps(
-            {'%s:%s' % k: v for k, v in mapping.items()},
+    mp_json = os.path.join(here, cfg['mapping']['pkl'].replace('.pkl', '.json'))
+    io.open(mp_json, 'wb').write(json.dumps(
+        {'%s:%s' % k: v for k, v in mapping.items()},
+        indent=1, ensure_ascii=False).encode('utf-8'))
+    with open(os.path.join(here, cfg['mapping']['pkl']), 'wb') as pf:
+        pickle.dump({'table': dict(mapping)}, pf)
+    if replace_std:
+        io.open(os.path.join(here, 'replace_std.json'), 'wb').write(json.dumps(
+            {'%s:%s' % k: v for k, v in replace_std.items()},
             indent=1, ensure_ascii=False).encode('utf-8'))
-        pickle.dump({'table': dict(mapping)}, open(os.path.join(here, cfg['mapping']['pkl']), 'wb'))
-        if replace_std:
-            io.open(os.path.join(here, 'replace_std.json'), 'wb').write(json.dumps(
-                {'%s:%s' % k: v for k, v in replace_std.items()},
-                indent=1, ensure_ascii=False).encode('utf-8'))
-        io.open(os.path.join(here, 'mapping_report.txt'), 'wb').write(
-            chr(10).join(report).encode('utf-8'))
-        print('маппинг: %d записей, replace_std: %d, отчёт: mapping_report.txt' % (len(mapping), len(replace_std)))
-    else:
-        print('(dry-run) маппинг: %d записей, replace_std: %d' % (len(mapping), len(replace_std)))
-        # сводка по режимам
-        from collections import Counter
-        kinds = Counter(l.split(':')[0] for l in report)
-        for k, n in kinds.items():
-            print('  %s: %d' % (k, n))
-            for l in [x for x in report if x.split(':')[0] == k][:5]:
-                print('    ', l)
+    io.open(os.path.join(here, 'mapping_report.txt'), 'wb').write(
+        chr(10).join(report).encode('utf-8'))
+    print('маппинг: %d записей, replace_std: %d, отчёт: mapping_report.txt' % (len(mapping), len(replace_std)))
 
 if __name__ == '__main__':
     main()

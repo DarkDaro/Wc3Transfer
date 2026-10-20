@@ -149,9 +149,13 @@ def main():
                     added += 1
             if added:
                 idx = cur.rfind('}')
-                cur = cur[:idx] + chr(10).join(add_lines) + chr(10) + cur[idx:]
-                io.open(imp_p, 'wb').write(cur.encode('utf-8'))
-                print('imp.ini: добавлено %d записей' % added)
+                # 20.10: без '}' вставка резала последний символ файла
+                if idx < 0:
+                    print('imp.ini: не найден закрывающий } — записи не добавлены')
+                else:
+                    cur = cur[:idx] + chr(10).join(add_lines) + chr(10) + cur[idx:]
+                    io.open(imp_p, 'wb').write(cur.encode('utf-8'))
+                    print('imp.ini: добавлено %d записей' % added)
 
 if __name__ == '__main__':
     main()

@@ -192,12 +192,14 @@ def scan_map_placement(tgt):
     return found
 
 
-def load_std_ids(tgt):
-    """Стандартные ID из prebuilt w3x2lni (рядом с source)."""
+def load_std_ids(tgt, cfgp=None):
+    """Стандартные ID из prebuilt w3x2lni (рядом с source).
+    20.10: конфиг передаётся снаружи (мультиконфиг), tgt оставлен
+    для совместимости вызова."""
     std = set()
-    # prebuilt ищем по конфигу (mapping.prebuilt_dir), дефолт — рядом
     here = os.path.dirname(os.path.abspath(__file__))
-    cfgp = os.path.join(here, 'transfer_config.json')
+    if not cfgp:
+        cfgp = os.path.join(here, 'transfer_config.json')
     pb = ''
     if os.path.exists(cfgp):
         cfg = json.load(io.open(cfgp, 'rb'))
@@ -228,7 +230,7 @@ def load_std_ids(tgt):
     return std
 
 
-def scan(tgt, suffix_patterns, manual_ids, protect_ids=None):
+def scan(tgt, suffix_patterns, manual_ids, protect_ids=None, cfgp=None):
     # 19.09: protect_ids = {type: [id,...]} — защитный список
     # (cleanup_protect.json): живые дамми-абилки/баффы, которые
     # сканер не должен помечать неиспользуемыми ни при каких фильтрах
@@ -236,7 +238,7 @@ def scan(tgt, suffix_patterns, manual_ids, protect_ids=None):
     tabs = load_tables(tgt)
     refs = collect_refs(tabs)
     code_ids = scan_code_literals(tgt)
-    std_ids = load_std_ids(tgt)
+    std_ids = load_std_ids(tgt, cfgp)
     # 19.09: расстановка карты — юниты/декорации,
     # стоящие на карте, всегда «используемые»
     place = scan_map_placement(tgt)
@@ -422,7 +424,7 @@ if __name__ == '__main__':
         if os.path.exists(pp):
             protect = json.load(io.open(pp, 'rb'))
             print('защитный список:', {k: len(v) for k, v in protect.items()})
-        res = scan(tgt, patterns, manual, protect)
+        res = scan(tgt, patterns, manual, protect, cfgp=ap[1])
         out = os.path.join(here, 'cleanup_scan.json')
         io.open(out, 'wb').write(json.dumps(res, indent=2, ensure_ascii=False).encode('utf-8'))
         print('скан ->', out)

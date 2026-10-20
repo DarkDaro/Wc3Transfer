@@ -109,11 +109,17 @@ def main():
     recount_z = geo.get('recount_z', True)
 
     # ===== doo =====
-    s_doo = io.open(os.path.join(src_map, 'war3map.doo'), 'rb').read()
-    t_doo = io.open(os.path.join(tgt_map, 'war3map.doo'), 'rb').read()
+    sd = os.path.join(src_map, 'war3map.doo')
+    td = os.path.join(tgt_map, 'war3map.doo')
+    if not (os.path.exists(sd) and os.path.exists(td)):
+        print('geometry: нет war3map.doo (%s) — этап пропущен' % ('источник' if not os.path.exists(sd) else 'приёмник'))
+        return
+    s_doo = io.open(sd, 'rb').read()
+    t_doo = io.open(td, 'rb').read()
     s_recs = parse_doo_records(s_doo)
     t_recs = parse_doo_records(t_doo)
-    max_num = max(r['num'] for r in t_recs)
+    # 20.10: пустой doo приёмника больше не роняет max()
+    max_num = max([r['num'] for r in t_recs] or [0])
     new_recs = list(t_recs)
     added = skipped = 0
     for r in s_recs:
@@ -135,8 +141,16 @@ def main():
         write_doo(new_recs, os.path.join(tgt_map, 'war3map.doo'))
 
     # ===== units =====
-    s_u = io.open(os.path.join(src_map, 'war3mapUnits.doo'), 'rb').read()
-    t_u = io.open(os.path.join(tgt_map, 'war3mapUnits.doo'), 'rb').read()
+    su = os.path.join(src_map, 'war3mapUnits.doo')
+    tu = os.path.join(tgt_map, 'war3mapUnits.doo')
+    if not (os.path.exists(su) and os.path.exists(tu)):
+        print('geometry: нет war3mapUnits.doo — units пропущены')
+        return
+    s_u = io.open(su, 'rb').read()
+    t_u = io.open(tu, 'rb').read()
+    if len(t_u) < 16 or len(s_u) < 16:
+        print('geometry: war3mapUnits.doo короче заголовка — units пропущены')
+        return
     t_cnt = int.from_bytes(t_u[12:16], 'little')
     s_cnt = int.from_bytes(s_u[12:16], 'little')
     new_units = bytearray(t_u)

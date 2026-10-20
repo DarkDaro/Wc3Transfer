@@ -143,13 +143,28 @@ def main():
             out_lines.extend(funcs[f])
             out_lines.append('')
     body = chr(10).join(out_lines) + chr(10)
-    # замена литералов
-    for tok, (new, t) in lit_hits.items():
-        body = re.sub(re.escape(chr(39) + tok + chr(39)), chr(39) + new + chr(39), body)
+    # замена литералов (20.10: один проход, без цепочки old->new->old)
+    def _lit_repl(m):
+        tok = m.group(1)
+        if tok in lit_hits:
+            return chr(39) + lit_hits[tok][0] + chr(39)
+        return m.group(0)
+    body = re.sub(r"'([A-Za-z0-9]{4})'", _lit_repl, body)
 
     deploy_to = cfg['code'].get('deploy_to', 'UFS')
+    # 20.10: папка триггеров могла получить номер (213-LIA) — писать
+    # вырезку в неё, а не в голый deploy_to рядом.
+    entry_name = deploy_to
+    has_entry = False
+    cat_p0 = os.path.join(cfg['target'], 'trigger', 'catalog.lml')
+    if os.path.exists(cat_p0):
+        cat0 = io.open(cat_p0, 'rb').read().decode('utf-8', errors='replace')
+        m0 = re.search(r"^'?(\d{3}-" + re.escape(deploy_to) + r")'?:", cat0, re.M)
+        if m0:
+            entry_name = m0.group(1)
+            has_entry = True
     out_name = cc.get('output', 'cut_code.j')
-    out_p = os.path.join(cfg['target'], 'trigger', deploy_to, out_name)
+    out_p = os.path.join(cfg['target'], 'trigger', entry_name, out_name)
     if dry:
         print('(dry-run) вырезано: %d функций, внешних globals: %d, литералов: %d, непокрытых: %d' % (len(seen), len(ext_g), len(lit_hits), len(uncovered)))
     else:
@@ -222,7 +237,7 @@ def main():
             cat_p = os.path.join(cfg['target'], 'trigger', 'catalog.lml')
             if os.path.exists(cat_p):
                 cat = io.open(cat_p, 'rb').read().decode('utf-8', errors='replace')
-                if not re.search(r"^'?\d{3}-" + re.escape(deploy_to) + r"'?:", cat, re.M):
+                if not has_entry:
                     nums = [int(m.group(1)) for m in re.finditer(r"^'?(\d{3})-", cat, re.M)]
                     nxt = max(nums) + 1 if nums else 1
                     line = "'%03d-%s': '%s'" % (nxt, deploy_to, deploy_to)
@@ -230,7 +245,7 @@ def main():
                     io.open(cat_p, 'wb').write(cat.encode('utf-8'))
                     print('catalog.lml: дописана папка %03d-%s' % (nxt, deploy_to))
                 else:
-                    print('catalog.lml: папка', deploy_to, 'уже есть')
+                    print('catalog.lml: папка', entry_name, 'уже есть')
 
         # 20.09: своя секция манифеста (merge — чужие секции не трогаю)
         deploy_manifest.merge_section(cfgp, 'code_cut', {

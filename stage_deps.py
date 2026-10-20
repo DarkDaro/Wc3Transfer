@@ -82,7 +82,10 @@ def main():
     # поля-ссылки: где искать чужие равкоды
     ABIL_KEYS = ['abilList', 'heroAbilList']
     BUFF_KEYS = ['buffList', 'BuffID', 'buffs']
-    ART_KEYS = ['Art', 'ButtonModel', 'Model', 'TargetArt', 'CasterArt', 'EffectArt', 'MissileArt', 'SpecialArt']
+    # 20.10: 'file' — модель юнита/предмета (раньше модели не попадали
+    # в deps и не импортировались: собирались только Art-поля).
+    ART_KEYS = ['file', 'Art', 'ButtonModel', 'Model', 'TargetArt', 'CasterArt',
+                'EffectArt', 'MissileArt', 'SpecialArt']
 
     keep = set(roots)
     queue = list(roots)

@@ -166,6 +166,9 @@ def scan(path, mode='both'):
             if _name == 'dec':
                 # dec: считаем только те, что пройдут ASCII-фильтр
                 n += sum(1 for m in pat.finditer(s) if dec2raw(int(m.group(0))))
+            elif _name == 'hex':
+                # 20.10: hex-режим тоже только печатаемые 4 байта
+                n += sum(1 for m in pat.finditer(s) if dec2raw(int(m.group(1))))
             else:
                 n += len(pat.findall(s))
         out.append((p, n))
@@ -181,7 +184,12 @@ def convert(path, backup_dir, mode='both'):
     def rep_hex(m):
         h = m.group(1)
         if h not in codes:
-            codes[h] = b"'" + decimal2ascii(int(h, 16)) + b"'"
+            # 20.10: непечатаемые байты (0x00000000 и т.п.) не превращаем
+            # в битый строковый литерал — оставляем как было.
+            raw = dec2raw(int(h, 16))
+            if raw is None:
+                return m.group(0)
+            codes[h] = b"'" + raw + b"'"
         return codes[h]
 
     def rep_dec(m):
@@ -294,6 +302,29 @@ def run(path, backup_dir, apply=False, mode='both'):
     return lines
 
 
+def raw2num(raw):
+    """29.09: 4-байтовый rawcode -> число (big-endian чтение)."""
+    n = 0
+    for c in raw:
+        n = n * 256 + c
+    return n
+
+
+def raw2hex(raw):
+    """rawcode -> 0xXXXXXXXX."""
+    return b'0x' + raw.hex().encode('ascii')
+
+
+def raw2dec(raw):
+    """rawcode -> десятичное число."""
+    return str(raw2num(raw)).encode('ascii')
+
+
+def raw2jhex(raw):
+    """rawcode -> $XXXXXXXX."""
+    return b'$' + raw.hex().encode('ascii')
+
+
 if __name__ == '__main__':
     import sys
     if len(sys.argv) < 2:
@@ -327,24 +358,3 @@ if __name__ == '__main__':
     here = os.path.dirname(os.path.abspath(__file__))
     for l in run(tgt, os.path.join(here, 'transfer_backup', 'rawconv'), apply=do, mode=mode):
         print(l)
-def raw2num(raw):
-    """29.09: 4-байтовый rawcode -> число (big-endian чтение)."""
-    n = 0
-    for c in raw:
-        n = n * 256 + c
-    return n
-
-
-def raw2hex(raw):
-    """rawcode -> 0xXXXXXXXX."""
-    return b'0x' + raw.hex().encode('ascii')
-
-
-def raw2dec(raw):
-    """rawcode -> десятичное число."""
-    return str(raw2num(raw)).encode('ascii')
-
-
-def raw2jhex(raw):
-    """rawcode -> $XXXXXXXX."""
-    return b'$' + raw.hex().encode('ascii')

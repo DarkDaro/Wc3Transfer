@@ -85,6 +85,10 @@ def fhash(p):
 def snapshot(cfg, stage, files):
     """Бэкап файлов перед этапом."""
     bdir = os.path.join(cfg_dir(), cfg['safety']['backup_dir'], stage)
+    # 20.10: прошлый бэкап этого этапа удаляем — иначе после двух
+    # прогонов в папке смешаны поколения и откат возвращает гибрид.
+    if os.path.isdir(bdir):
+        shutil.rmtree(bdir)
     os.makedirs(bdir, exist_ok=True)
     n = 0
     for p in files:
@@ -157,7 +161,10 @@ def run_stage(cfg, stage, dry):
     dt = time.time() - t0
     out = (r.stdout or '') + (r.stderr or '')
     if out.strip():
-        for l in out.splitlines()[-30:]:
+        # 20.10: при ошибке показываем больше строк — раньше трейсбек
+        # обрезался до 30 строк и причина падения терялась.
+        tail = 100 if r.returncode != 0 else 30
+        for l in out.splitlines()[-tail:]:
             log(cfg, '  | ' + l)
     # 20.09: этап дольше 2 сек — показать время (аномалии сразу видны)
     if dt > 2:
@@ -185,10 +192,20 @@ def main():
                     help='пересчитать реестр занятых ID и маппинг (после смены source/target)')
     args = ap.parse_args()
 
+    if args.stage and args.stage not in STAGES:
+        print('ОШИБКА: неизвестный этап %r. Доступны: %s'
+              % (args.stage, ', '.join(STAGES)))
+        sys.exit(2)
+
     cfg = load_cfg()
     st = load_state(cfg)
     profile = cfg.get('profile', 'custom')
-    stages = PROFILES.get(profile) or [s for s in STAGES if stage_enabled(cfg, s)]
+    # 20.10: профиль задаёт базовый набор, галочки stage_enabled его сужают.
+    # Раньше stage_enabled писался GUI, но оркестратор его не читал.
+    base = PROFILES.get(profile)
+    if base is None:
+        base = STAGES
+    stages = [s for s in base if stage_enabled(cfg, s)]
 
     if args.status:
         print('Пара:', st.get('pair', '?'))
@@ -221,6 +238,7 @@ def main():
                 shutil.copy2(src, dst)
                 n += 1
         print('Откат после этапа', last, ': восстановлено', n, 'файлов')
+        print('Файлы, созданные этапом заново, откат не удаляет.')
         st['completed'] = st['completed'][:st['completed'].index(last)] if last in st.get('completed', []) else st.get('completed', [])
         st['last_ok_stage'] = None
         save_state(cfg, st)
@@ -273,23 +291,24 @@ def main():
                 # прошлой итерацией, иначе mapping не знает занятых ID)
                 log(cfg, '=== ЭТАПЫ: %d' % (len(core) + 1))
                 if it > 1:
-                    r0 = run_stage(cfg, 'registry', False)
+                    r0 = run_stage(cfg, 'registry', args.dry_run)
                     if r0 == 'fail':
                         log(cfg, 'ОСТАНОВКА: registry упал')
                         sys.exit(1)
-                st['completed'] = [s for s in st.get('completed', []) if s not in core]
-                save_state(cfg, st)
+                if not args.dry_run:
+                    st['completed'] = [s for s in st.get('completed', []) if s not in core]
+                    save_state(cfg, st)
                 grew = False
                 deps_before = _deps_sig(cfg)
                 for s in core:
                     files = target_files(cfg, s)
-                    if files:
+                    if files and not args.dry_run:
                         snapshot(cfg, s, files)
-                    r = run_stage(cfg, s, False)
+                    r = run_stage(cfg, s, args.dry_run)
                     if r == 'fail' and cfg['safety']['stop_on_error']:
                         log(cfg, 'ОСТАНОВКА на этапе %s' % s)
                         sys.exit(1)
-                    if r == 'ok':
+                    if r == 'ok' and not args.dry_run:
                         st.setdefault('completed', []).append(s)
                         st['last_ok_stage'] = s
                         save_state(cfg, st)
@@ -300,7 +319,8 @@ def main():
                     break
             log(cfg, 'ПОЛНЫЙ ЦИКЛ ЗАВЕРШЁН (%d итераций)' % (it))
             return
-        todo = stages if args.all or args.dry_run else [args.stage]
+        # 20.10: --stage вместе с --dry-run больше не запускает ВСЕ этапы
+        todo = [args.stage] if args.stage else stages
         # 20.09: прогресс-бар GUI — общее число этапов прогона
         log(cfg, '=== ЭТАПЫ: %d' % len(todo))
         if args.dry_run:
@@ -341,6 +361,11 @@ def _deps_sig(cfg):
     return '|'.join(parts)
 
 def stage_enabled(cfg, s):
+    # 20.10: галочки этапов из GUI (cfg['stage_enabled']) наконец читаются.
+    # Явное значение в конфиге главнее флагов секций.
+    se = cfg.get('stage_enabled') or {}
+    if s in se:
+        return bool(se[s])
     if s == 'geometry':
         return cfg.get('geometry', {}).get('enabled', False)
     if s == 'testspawn':

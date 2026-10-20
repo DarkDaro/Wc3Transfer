@@ -405,6 +405,14 @@ def main():
         sys.exit(1)
     cfg = json.load(io.open(sys.argv[1], 'rb'))
     tgt = cfg['target']
+    # 20.10: окно «Чистка триггеров» умеет работать с другой картой,
+    # но этап читал только cfg['target'] — скан шёл по приёмнику.
+    if '--dir' in sys.argv:
+        di = sys.argv.index('--dir')
+        if di + 1 >= len(sys.argv):
+            print('ОШИБКА: --dir без пути')
+            sys.exit(2)
+        tgt = os.path.abspath(sys.argv[di + 1])
     here = os.path.dirname(os.path.abspath(sys.argv[1]))
     if '--scan' in sys.argv:
         opts = json.load(io.open(sys.argv[sys.argv.index('--scan') + 1], 'rb'))
@@ -497,6 +505,10 @@ def main():
                 continue
             for ext in ('.j', '.lml', '.txt'):
                 p = base + ext
+                # 20.10: заметку не удаляем, если скан обещал её сохранить
+                if ext == '.txt' and d.get('del_notes') is False:
+                    log.append('заметка сохранена: %s' % os.path.relpath(p, tgt))
+                    continue
                 if os.path.exists(p):
                     rel = os.path.relpath(p, tgt)
                     dst = os.path.join(bdir, rel.replace('\\', '_'))
@@ -624,7 +636,8 @@ def main():
         # после удаления триггеров/заметок освободившиеся
         # папки тоже сносятся (за один прогон)
         if not DRY and d.get('empty_dirs') is not None:
-            ed2, et2 = scan_empty_dirs(tgt, True)
+            # 20.10: исключения действуют и во втором проходе
+            ed2, et2 = scan_empty_dirs(tgt, True, exclude=list(excl))
             if ed2:
                 for p in sorted(ed2, key=lambda x: -x.count(os.sep)):
                     try:

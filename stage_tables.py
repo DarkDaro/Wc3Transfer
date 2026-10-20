@@ -3,6 +3,8 @@
 # 2. _parent: маппится по маппингу; стандартный (не в маппинге) — не трогается
 # 3. Ссылки в полях (abilList, buffList, Art-пути не трогаются; равкоды
 #    в abilList/buffList заменяются по маппингу)
+# 20.10: режим replace_std применяется здесь (replace_std.json), пути
+# переименованных ассетов (assets_renames) подставляются в секции.
 # Dry-run: только отчёт, без записи.
 import io, os, sys, json, re
 
@@ -52,6 +54,63 @@ def replace_refs_in_body(lines, ref_map):
         out.append(l)
     return out
 
+def replace_asset_paths(lines, renames):
+    """20.10: пути из deps_result.assets_renames (конфликт -> _v2).
+    В ini/lml слеши удвоены, поэтому проверяем оба написания."""
+    if not renames:
+        return lines
+    pairs = []
+    for old, new in renames.items():
+        new_s = new.replace('\\', '\\\\')
+        pairs.append((old, new_s))
+        pairs.append((old.replace('\\', '\\\\'), new_s))
+        pairs.append((old.replace('/', '\\\\'), new_s))
+    out = []
+    for l in lines:
+        for old, new in pairs:
+            if old and old in l:
+                l = l.replace(old, new)
+        out.append(l)
+    return out
+
+def apply_std_fields(text, sid, fields):
+    """20.10: вписать поля в существующую секцию [sid] (режим replace_std).
+    Возвращает (новый текст, сколько полей применено)."""
+    lines = text.split('\n')
+    start = None
+    end = len(lines)
+    for i, l in enumerate(lines):
+        m = re.match(r'^\[([^\]]+)\]', l)
+        if not m:
+            continue
+        if start is not None:
+            end = i
+            break
+        if m.group(1) == sid:
+            start = i
+    if start is None:
+        return text, 0
+    applied = set()
+    in_block = False
+    for i in range(start + 1, end):
+        l = lines[i]
+        if not in_block:
+            mm = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=', l)
+            if mm and mm.group(1) in fields:
+                lines[i] = '%s = %s' % (mm.group(1), fields[mm.group(1)])
+                applied.add(mm.group(1))
+        if not in_block and l.rstrip().endswith('[=['):
+            in_block = True
+        elif in_block and ']=]' in l:
+            in_block = False
+    missing = [k for k in fields if k not in applied]
+    if missing:
+        pos = end
+        while pos > start + 1 and lines[pos - 1].strip() == '':
+            pos -= 1
+        lines[pos:pos] = ['%s = %s' % (k, fields[k]) for k in missing]
+    return '\n'.join(lines), len(applied) + len(missing)
+
 def main():
     cfgp = sys.argv[1]
     dry = '--dry-run' in sys.argv
@@ -70,20 +129,39 @@ def main():
         if old != new:
             ref_map[old] = new
 
+    # 20.10: переименованные при импорте ассеты и поля replace_std
+    renames = {}
+    deps_p = os.path.join(here, 'deps_result.json')
+    if os.path.exists(deps_p):
+        try:
+            renames = json.load(io.open(deps_p, 'rb')).get('assets_renames') or {}
+        except ValueError:
+            renames = {}
+    std_p = os.path.join(here, 'replace_std.json')
+    std_all = {}
+    if os.path.exists(std_p):
+        try:
+            std_all = json.load(io.open(std_p, 'rb'))
+        except ValueError:
+            std_all = {}
+
     total = 0
+    applied_std = 0
+    errors = 0
     for t in cfg['tables']:
         sp = os.path.join(src, 'table', t + '.ini')
         tp = os.path.join(tgt, 'table', t + '.ini')
+        if not os.path.exists(tp):
+            # 20.10: раньше здесь был трейсбек FileNotFoundError
+            print('%s: ОШИБКА — нет файла приёмника %s' % (t, tp))
+            errors += 1
+            continue
         secs, order = parse_sections_raw(sp)
         tsecs, torder = parse_sections_raw(tp)
         # какие секции переносим
         tsec_ids = set(tsecs)
         to_move = [(old, mp[t + ':' + old]) for old in order
                    if (t + ':' + old) in mp and mp[t + ':' + old] not in tsec_ids]
-        if not to_move:
-            print('%s: нечего переносить' % t)
-            continue
-        # текст секций для вставки
         blocks = []
         for old, new in to_move:
             lines = list(secs[old])
@@ -95,10 +173,12 @@ def main():
                     npar = mp.get(t + ':' + par, par)  # стандарт не трогаем
                     lines[i] = l[:m.start(2)] + npar + l[m.end(2):]
             lines = replace_refs_in_body(lines, ref_map)
+            lines = replace_asset_paths(lines, renames)
             blocks.append('[' + new + ']' + chr(10) + chr(10).join(lines).rstrip() + chr(10))
         if dry:
-            print('%s: перенеслось бы %d секций (dry-run)' % (t, len(blocks)))
-        else:
+            if blocks:
+                print('%s: перенеслось бы %d секций (dry-run)' % (t, len(blocks)))
+        elif blocks:
             # дописать в хвост приёмника
             cur = io.open(tp, 'rb').read().decode('utf-8', errors='replace')
             add = ''.join(blocks)
@@ -106,11 +186,40 @@ def main():
                 add = chr(10) + add
             io.open(tp, 'wb').write((cur + add).encode('utf-8'))
             print('%s: перенесено %d секций' % (t, len(blocks)))
-        ids = [b.split(']')[0][1:] for b in blocks[:12]]
-        print('  ID:', ', '.join(ids) + (' ...' if len(blocks) > 12 else ''))
-        total += len(blocks)
+        elif not to_move:
+            print('%s: нечего переносить' % t)
 
-    print('ИТОГО секций:', total, ('(dry-run)' if dry else ''))
+        # 20.10: replace_std — поля поверх стандартных секций приёмника
+        repl = {}
+        for k, v in std_all.items():
+            kt, sid = k.split(':', 1)
+            if kt == t:
+                repl[sid] = v
+        if repl:
+            text = io.open(tp, 'rb').read().decode('utf-8', errors='replace')
+            n_std = 0
+            for sid, fields in sorted(repl.items()):
+                text, nf = apply_std_fields(text, sid, fields)
+                if nf:
+                    n_std += nf
+                else:
+                    print('  replace_std: секции %s нет в приёмнике — пропуск' % sid)
+            if n_std and not dry:
+                io.open(tp, 'wb').write(text.encode('utf-8'))
+            if n_std:
+                print('%s: replace_std применено полей: %d%s'
+                      % (t, n_std, ' (dry-run)' if dry else ''))
+                applied_std += n_std
+
+        if blocks:
+            ids = [b.split(']')[0][1:] for b in blocks[:12]]
+            print('  ID:', ', '.join(ids) + (' ...' if len(blocks) > 12 else ''))
+            total += len(blocks)
+
+    print('ИТОГО секций:', total, '| replace_std полей:', applied_std,
+          ('(dry-run)' if dry else ''))
+    if errors:
+        sys.exit(1)
 
 if __name__ == '__main__':
     main()

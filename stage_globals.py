@@ -65,9 +65,12 @@ def vl_parse(text):
         out[m.group(1)] = (m.group(2), arr)
     return out
 
-def collect_target_globals(tgt):
-    """Имя -> тип по всем globals приёмника (war3map.j + trigger/**/*.j)."""
+def collect_target_globals(tgt, skip_paths=None):
+    """Имя -> тип по всем globals приёмника (war3map.j + trigger/**/*.j).
+    20.10: skip_paths — не считать собственный прошлый <X>-Globals.j
+    (иначе повторный прогон видел конфликт с самим собой)."""
     gm = {}
+    skip = set(os.path.normcase(os.path.abspath(x)) for x in (skip_paths or []))
     wj = os.path.join(tgt, 'map', 'war3map.j')
     if os.path.exists(wj):
         for l in parse_globals_block(io.open(wj, 'rb').read().decode('utf-8', errors='replace')):
@@ -83,6 +86,8 @@ def collect_target_globals(tgt):
             for f in fs:
                 if f.endswith('.j'):
                     p = os.path.join(dirpath, f)
+                    if os.path.normcase(os.path.abspath(p)) in skip:
+                        continue
                     try:
                         s = io.open(p, 'rb').read().decode('utf-8', errors='replace')
                     except Exception:
@@ -123,7 +128,7 @@ def main():
     cat_p = os.path.join(trig_tgt, 'catalog.lml')
     if os.path.exists(cat_p):
         cat0 = io.open(cat_p, 'rb').read().decode('utf-8', errors='replace')
-        m0 = re.search(r"^'(\d{3}-" + re.escape(deploy_to) + r"'):", cat0, re.M)
+        m0 = re.search(r"^'?(\d{3}-" + re.escape(deploy_to) + r")'?:", cat0, re.M)
         if m0:
             entry_name = m0.group(1)
     fname = entry_name + '-Globals.j'
@@ -138,7 +143,10 @@ def main():
         if old_ge and old_ge != entry_name + '-Globals':
             deploy_manifest.purge_catalog_entry(cfgp, tgt, old_ge)
 
-    tgt_gm = collect_target_globals(tgt)
+    skip_g = [dst]
+    if m_old and m_old.get('globals_file'):
+        skip_g.append(os.path.join(tgt, m_old['globals_file'].replace('/', os.sep)))
+    tgt_gm = collect_target_globals(tgt, skip_paths=skip_g)
     print('глобалов в источнике:', len(src_decls), '| в приёмнике:', len(tgt_gm))
 
     # 21.09 фикс B: udg_ донора, перечисленные в его variable.lml,

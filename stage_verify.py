@@ -122,25 +122,10 @@ def main():
     # 17.09: проверка ПОСЛЕ полной загрузки всех таблиц (была
     # внутри цикла — ability ещё не загружен при проверке unit)
     # стандартные ID WC3 (prebuilt приёмника) — не битые ссылки
+    # 20.10: второй блок поиска prebuilt убран, используем уже собранный pb
     std_ids = set()
-    # 22.09: prebuilt-путь дублируется здесь и в блоке PB выше —
-    # единый источник теперь cfg, fallback общий. Старый хардкод
-    # (двойная вложенность w3x2lni_enUS_v2.7.2\w3x2lni_enUS_v2.7.2)
-    # не существовал -> тысячи ложных «БИТЫЙ _PARENT» на стандартные ID.
-    PB = cfg.get('mapping', {}).get('prebuilt_dir', '')
-    if not PB:
-        import glob as _glob
-        _srcdir = os.path.dirname(cfg.get('source', ''))
-        cand = _glob.glob(os.path.join(_srcdir, '*', 'data', '*', 'prebuilt', 'Custom'))
-        if not cand:
-            cand = _glob.glob(os.path.join(_srcdir, 'data', '*', 'prebuilt', 'Custom'))
-        if not cand:
-            cand = _glob.glob(r'G:\w3x2lni_enUS_v2.7.2\data\*\prebuilt\Custom')
-        PB = cand[0] if cand else ''
-    if os.path.isdir(PB):
-        for f in os.listdir(PB):
-            if f.endswith('.ini'):
-                std_ids |= parse_sections(os.path.join(PB, f))
+    for _ids in pb.values():
+        std_ids |= _ids
     for t in ['unit', 'item', 'ability']:
         for k, new in mp.items():
             if not k.startswith(t + ':'):
@@ -264,13 +249,13 @@ def main():
         s = io.open(tp, 'rb').read().decode('utf-8', errors='replace')
         seen = {}
         in_block = False  # внутри [=[ ]=] — не секции
-        for l in s.splitlines():
+        for ln, l in enumerate(s.splitlines(), 1):
             if not in_block:
                 m = re.match(r'^\[([^\]]+)\]', l)
                 if m:
                     sid = m.group(1)
                     if sid in seen:
-                        print('ДУБЛЬ СЕКЦИИ %s: [%s] (второй раз, строка %d)' % (t, sid, len(seen)))
+                        print('ДУБЛЬ СЕКЦИИ %s: [%s] (второй раз, строка %d)' % (t, sid, ln))
                         errs += 1
                     seen[sid] = True
             # [=[ ]=] блоки: внутри текст, не секции
