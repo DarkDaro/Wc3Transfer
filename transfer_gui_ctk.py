@@ -1067,7 +1067,19 @@ class App(ctk.CTk):
                 # восстанавливается, контент не влезает
                 m = re.match(r'^(\d+)x(\d+)', geo)
                 if m and int(m.group(1)) > 400 and int(m.group(2)) > 400:
-                    self.geometry(geo)
+                    # 20.10 (аудит-фикс): координаты клампятся к экрану.
+                    # Сохранённое на отключённом втором мониторе окно
+                    # открывалось ВНЕ видимой области — процесс работал,
+                    # а GUI казался не запущенным
+                    mm = re.search(r'([+-]\d+)\s*([+-]\d+)\s*$', geo)
+                    if mm:
+                        x, y = int(mm.group(1)), int(mm.group(2))
+                        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+                        x = max(-40, min(x, sw - 320))
+                        y = max(-40, min(y, sh - 320))
+                        self.geometry('%dx%d+%d+%d' % (int(m.group(1)), int(m.group(2)), x, y))
+                    else:
+                        self.geometry(geo)
             except Exception:
                 pass
         # 20.10 (аудит): выбор этапов восстанавливается из конфига —
@@ -2287,5 +2299,23 @@ class App(ctk.CTk):
 
 
 if __name__ == '__main__':
-    app = App()
-    app.mainloop()
+    try:
+        app = App()
+        app.mainloop()
+    except Exception:
+        # 20.10 (аудит-фикс): под pythonw консоли нет — любая ошибка
+        # старта умирала молча («батник не запускает»). Пишем
+        # logs/gui_crash.log и показываем диалог с трейсбеком.
+        import traceback
+        tb = traceback.format_exc()
+        try:
+            os.makedirs(os.path.join(HERE, 'logs'), exist_ok=True)
+            with io.open(os.path.join(HERE, 'logs', 'gui_crash.log'), 'wb') as f:
+                f.write(tb.encode('utf-8'))
+        except Exception:
+            pass
+        try:
+            messagebox.showerror('Ошибка запуска GUI', tb[-1500:])
+        except Exception:
+            pass
+        raise
