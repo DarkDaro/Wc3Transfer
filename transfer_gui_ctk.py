@@ -866,6 +866,40 @@ class App(ctk.CTk):
         self.e_tsrect.pack(fill="x", pady=(0, 6))
         Tooltip(self.e_tsrect, "center или пусто — спавн в центре карты (0, 0).\nИначе — имя региона (gg_rct_team_1_spawn).")
 
+        # 7. Пути и лимиты (22.10): ключи, которые CLI-этапы берут из конфига
+        pf7, pi7 = self._card(right, "7. Пути и лимиты ( Обслуживание )")
+        pf7.pack(fill="x", pady=4)
+        ctk.CTkLabel(pi7, text="Пусто = путь по умолчанию (logs/ и transfer_backup/ у конфига).",
+                     font=FONT_SMALL, anchor="w").pack(fill="x")
+        _prow = {}
+        def srv_row(sec, key, label):
+            r = ctk.CTkFrame(pi7, fg_color="transparent")
+            r.pack(fill="x", pady=1)
+            ctk.CTkLabel(r, text=label, width=132, anchor="w",
+                         font=FONT_SMALL).pack(side="left")
+            e = ctk.CTkEntry(r, font=FONT_MONO, height=26)
+            e.pack(side="left", fill="x", expand=True, padx=4)
+            ctk.CTkButton(r, text="...", width=30, height=26,
+                          command=lambda: self._pick(e)).pack(side="left")
+            Tooltip(e, 'Каталог для журналов/бэкапов, конфиг-ключ '
+                       + sec + '.' + key + '.\nПусто = по умолчанию, рядом с конфигом.')
+            _prow[(sec, key)] = e
+            return e
+        self.e_clog = srv_row('cleanup', 'log_dir', 'Чистка, журнал:')
+        self.e_cbak = srv_row('cleanup', 'backup_dir', 'Чистка, бэкапы:')
+        self.e_tlog = srv_row('trigclean', 'log_dir', 'Тригклин, журнал:')
+        self.e_tbak = srv_row('trigclean', 'backup_dir', 'Тригклин, бэкапы:')
+        self.e_rlog = srv_row('repair', 'log_dir', 'Починка, журнал:')
+        self.e_rbak = srv_row('repair', 'backup_dir', 'Починка, бэкапы:')
+        self.e_rvbak = srv_row('rawconv', 'backup_dir', 'Конверт, бэкапы:')
+        # лимит этапа дублируется здесь (зеркало левой колонки — читается
+        # из того же self.e_tmo при сборке конфига)
+        row_tmo2 = ctk.CTkFrame(pi7, fg_color="transparent")
+        row_tmo2.pack(fill="x", pady=(4, 0))
+        ctk.CTkLabel(row_tmo2, text='Лимит этапа, мин (0 = без лимита), поле «Опции» слева:',
+                     font=FONT_SMALL, anchor="w").pack(fill="x")
+        Tooltip(row_tmo2, 'Единое поле — на колонке этапов слева (self.e_tmo).\nЗдесь только напоминание, где лежит настройка.')
+
         # --- кнопки (22.10 (UI): на вкладке Перенос; кнопки обслуживания
         # переехали на вкладку Обслуживание через ab_svc) ---
         btns = ctk.CTkFrame(tab_t, fg_color="transparent")
@@ -873,8 +907,8 @@ class App(ctk.CTk):
 
         def ab(parent, text, cmd, hint_text=None, color=None, w=None):
             kw = {}
-            if w:
-                kw['width'] = w
+            w = w or 132    # 22.10 (UI): единая ширина — ровный ряд кнопок
+            kw['width'] = w
             if color == 'danger':
                 kw['fg_color'] = DANGER
                 kw['hover_color'] = DANGER_H
@@ -903,9 +937,9 @@ class App(ctk.CTk):
         self.b_remap = ab(btns, "Переписать маппинг", lambda: self._run(['--remap']),
            "Пересчитать реестр занятых ID приёмника и маппинг\nпод ТЕКУЩУЮ пару карт. Запускай после смены\nисточника/приёмника — иначе маппинг останется\nот старой карты (риск коллизий ID).")
         self.b_run = ab(btns, "ЗАПУСК (запись!)", self._run_all,
-           "Боевой прогон с записью в приёмник. Снапшоты делаются автоматически,\nоткат — кнопка «Откат».", color='danger')
+           "Боевой прогон с записью в приёмник. Снапшоты делаются автоматически,\nоткат — кнопка «Откат».", color='danger', w=170)
         self.b_loop = ab(btns, "Полный цикл (повторы)", self._run_loop,
-           "deps->mapping->tables->import->code_cut повторами, пока код находит\nновые дамми (макс 5 итераций). Для переноса героев из монолита.", color='ok')
+           "deps->mapping->tables->import->code_cut повторами, пока код находит\nновые дамми (макс 5 итераций). Для переноса героев из монолита.", color='ok', w=150)
         self.b_status = ab(btns, "Статус", lambda: self._run(['--status']),
            "Какие этапы уже пройдены (state).")
         self.b_rollback = ab(btns, "Откат", lambda: self._run(['--rollback']),
@@ -915,7 +949,7 @@ class App(ctk.CTk):
         self.b_manifest = ab_svc('Отчёты и прочее', "Манифест", self._manifest,
            "Отчёт о переносе в mdlog/transfer/ (что перенесено, конфликты ID).")
         self.b_verify = ab_svc('Проверка и чистка', "Верификация", self._verify_only,
-           "Только проверка приёмника БЕЗ переноса: битые ссылки,\nдубли секций, циклы _parent, imp.ini, баланс скобок .j.\nБезопасно — ничего не пишет в карту.")
+           "Только проверка приёмника БЕЗ переноса: битые ссылки,\nдубли секций, циклы _parent, imp.ini, баланс скобок .j.\nБезопасно — ничего не пишет в карту.", color='ok')
         self.b_cleanup = ab_svc('Проверка и чистка', "Чистка объектов...", self._cleanup_window,
            "Чистка карты: неиспользуемые объекты, битые равкоды,\nнеудаляемые способности (по суффиксу/равкоду).\n19.09: расстановка карты (war3map.doo/Units.doo) читается —\nюниты/декорации на карте не удаляются.\nСкан -> список -> подтверждение -> удаление. Никаких молчаливых удалений.")
         self.b_repair = ab_svc('Проверка и чистка', "Починить таблицы", self._repair_main,
@@ -1347,6 +1381,22 @@ class App(ctk.CTk):
         se = cfg.setdefault('stage_enabled', {})
         for s in STAGES:
             se[s] = self.stage_vars[s].get()
+        # 22.10: пути Обслуживания — пустое поле убирает ключ из конфига
+        # (этапы берут дефолт рядом с конфигом)
+        _prow = [[('cleanup', 'log_dir'), self.e_clog],
+                 [('cleanup', 'backup_dir'), self.e_cbak],
+                 [('trigclean', 'log_dir'), self.e_tlog],
+                 [('trigclean', 'backup_dir'), self.e_tbak],
+                 [('repair', 'log_dir'), self.e_rlog],
+                 [('repair', 'backup_dir'), self.e_rbak],
+                 [('rawconv', 'backup_dir'), self.e_rvbak]]
+        for (sec, key), ent in _prow:
+            v = ent.get().strip()
+            c = cfg.setdefault(sec, {})
+            if v:
+                c[key] = v
+            else:
+                c.pop(key, None)
         return cfg
 
     def _save_cfg(self):
@@ -1412,6 +1462,18 @@ class App(ctk.CTk):
         tmo = self.cfg.get('safety', {}).get('stage_timeout_min', 15)
         self.e_tmo.delete(0, 'end')
         self.e_tmo.insert(0, ('%g' % tmo) if isinstance(tmo, (int, float)) else str(tmo))
+        # 22.10: пути Обслуживания — восстановление из конфига
+        for attr, sec, key in [('e_clog', 'cleanup', 'log_dir'),
+                               ('e_cbak', 'cleanup', 'backup_dir'),
+                               ('e_tlog', 'trigclean', 'log_dir'),
+                               ('e_tbak', 'trigclean', 'backup_dir'),
+                               ('e_rlog', 'repair', 'log_dir'),
+                               ('e_rbak', 'repair', 'backup_dir'),
+                               ('e_rvbak', 'rawconv', 'backup_dir')]:
+            e = getattr(self, attr, None)
+            if e is not None:
+                e.delete(0, 'end')
+                e.insert(0, self.cfg.get(sec, {}).get(key, ''))
         g = self.cfg.get('gui', {})
         self.v_sound.set(g.get('sound_on_done', False))
         self.v_autolog.set(g.get('autolog', False))
