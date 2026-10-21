@@ -316,10 +316,12 @@ def scan_globals(tgt, files_code):
             if m:
                 names.append(m.group(1))
     # 19.09: собираем ВЕСЬ текст карты как источник упоминаний
-    all_code = ''
+    # 21.10: склейка через список + join — += на длинной строке был
+    # квадратичным (18 сек на большой карте)
+    parts = []
     for i, p in enumerate(files_code):
         try:
-            all_code += rp(p)
+            parts.append(rp(p))
         except OSError:
             pass
         # 21.10: хартбит каждые 100 файлов — видно движение в стриме
@@ -330,7 +332,7 @@ def scan_globals(tgt, files_code):
     for p in extra:
         if os.path.exists(p):
             try:
-                all_code += rp(p)
+                parts.append(rp(p))
             except OSError:
                 pass
     # .lml/.txt в trigger/ (текст триггеров GUI-формата)
@@ -340,9 +342,10 @@ def scan_globals(tgt, files_code):
             if f.endswith('.lml') or f.endswith('.txt'):
                 fp = os.path.join(dirpath, f)
                 try:
-                    all_code += rp(fp)
+                    parts.append(rp(fp))
                 except OSError:
                     pass
+    all_code = ''.join(parts)
     # 21.10: ОДИН проход по тексту вместо сотни re.search «на каждое
     # имя по мегабайтам» — поиск udg_имён был главным тормозом скана
     # (минуты тишины GUI). Списки used/unused формируются проверкой

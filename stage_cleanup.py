@@ -29,6 +29,12 @@ REF_FIELDS = {'abilList', 'BuffId', 'upgradeList', 'UpgradeArt',
               'itemAbility'}
 DEFAULT_SUFFIX_PATTERNS = ['(убрано)', '(Убрано)', 'не используется']
 
+# 21.10: предкомпилированные регексы — сканы по 750 тыс. строк
+# на большой карте льют re.match с ручной строкой; lookup
+# компиляции выкидываем
+_RX_SECTION = re.compile(r'^\[([^\]]+)\]')
+_RX_FIELD = re.compile(r'^(\w+)\s*=\s*(.*)$')
+
 
 def parse_bodies(path):
     out = {}
@@ -39,7 +45,7 @@ def parse_bodies(path):
     in_block = False
     for l in s.splitlines():
         if not in_block:
-            m = re.match(r'^\[([^\]]+)\]', l)
+            m = _RX_SECTION.match(l)
             if m:
                 cur = m.group(1)
                 out[cur] = []
@@ -88,7 +94,7 @@ def collect_refs(tabs):
             i = 0
             while i < len(lines):
                 l = lines[i]
-                m = re.match(r'^(\w+)\s*=\s*(.*)$', l)
+                m = _RX_FIELD.match(l)
                 if not m:
                     i += 1
                     continue
