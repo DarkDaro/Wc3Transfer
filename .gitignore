@@ -15,6 +15,10 @@ triggers_*.json
 mapping_report.txt
 M_init.txt
 ASCII log.txt
+# 21.10: рабочие файлы пайплайна рядом с конфигом
+import_created.txt
+mapping_pair.json
+replace_std.json
 
 # ============================================
 # Одноразовые диагностические/патчевые скрипты

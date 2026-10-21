@@ -202,14 +202,19 @@ if __name__ == '__main__':
     tgt = cfg['target']
     here = os.path.dirname(os.path.abspath(sys.argv[1]))
     do = '--repair' in sys.argv
-    backup_dir = os.path.join(here, cfg['safety']['backup_dir'], 'repair')
+    # 21.10: пути починки настраиваемые и рядом с конфигом (консистентно
+    # с пайплайном): repair.log_dir / repair.backup_dir, иначе
+    # logs/ и safety.backup_dir/repair у конфига.
+    rcfg = cfg.get('repair', {})
+    backup_dir = rcfg.get('backup_dir') or os.path.join(here, cfg['safety']['backup_dir'], 'repair')
     if do:
         os.makedirs(backup_dir, exist_ok=True)
     report, total = repair(tgt, None, backup_dir, do=do, cfgp=sys.argv[1])
     for l in report:
         print(l)
     if do:
-        os.makedirs(os.path.join(here, 'logs'), exist_ok=True)
-        lp = os.path.join(here, 'logs', 'repair-%s.md' % time.strftime('%Y-%m-%d'))
+        ldir = rcfg.get('log_dir') or cfg.get('log_dir') or os.path.join(here, 'logs')
+        os.makedirs(ldir, exist_ok=True)
+        lp = os.path.join(ldir, 'repair-%s.md' % time.strftime('%Y-%m-%d'))
         io.open(lp, 'ab').write(('\n'.join(report) + '\n\n').encode('utf-8'))
         print('лог ->', lp)

@@ -75,7 +75,8 @@ DEFAULT_CFG = {
     },
     'profile': 'custom',
     'safety': {'backup_dir': 'transfer_backup', 'state_file': 'transfer_state.json',
-               'dry_run_first': True, 'stop_on_error': True},
+               'dry_run_first': True, 'stop_on_error': True,
+               'stage_timeout_min': 15},
     'deps': {'roots': []},
     'code_cut': {'enabled': False, 'entries': [], 'output': 'cut_heroes.j', 'auto_expand': True},
     'stage_enabled': {'mapping': True, 'registry': True, 'deps': True, 'tables': True,
@@ -511,6 +512,17 @@ class App(ctk.CTk):
                              font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
         c7.pack(anchor="w", padx=12, pady=2)
         Tooltip(c7, "После завершения прогона открыть logs/transfer.log.")
+        # 21.10: лимит этапа настраивается; 0 = без лимита. Жёсткие
+        # 15 минут убивали рабочий этап на больших картах.
+        row_tmo = ctk.CTkFrame(left, fg_color="transparent")
+        row_tmo.pack(fill="x", padx=12, pady=(2, 0))
+        ctk.CTkLabel(row_tmo, text="Лимит этапа, мин:", font=FONT_SMALL).pack(side="left")
+        self.e_tmo = ctk.CTkEntry(row_tmo, font=FONT_MONO, width=64, height=26)
+        self.e_tmo.pack(side="left", padx=6)
+        self.e_tmo.insert(0, "15")
+        Tooltip(self.e_tmo, "Сколько минут ждать один этап (например geometry).\n"
+                            "0 = ждать сколько нужно (лимита нет).\n"
+                            "Хранится в конфиге: safety.stage_timeout_min.")
 
         # правая колонка: настройки (скролл)
         right = ctk.CTkScrollableFrame(mid, fg_color="transparent")
@@ -1056,11 +1068,24 @@ class App(ctk.CTk):
                         self.pbar.set(0)
                         self.pct_lbl.configure(text='0%')
                     elif msg.startswith('@@STAGE '):
+                        # 21.10: имя текущего этапа — для статуса пульса
+                        self._cur_stage = msg.split(' ', 1)[1].strip()
                         if getattr(self, '_pb_total', 0):
                             self._pb_done += 1
                             frac = min(self._pb_done, self._pb_total) / self._pb_total
                             self.pbar.set(frac)
                             self.pct_lbl.configure(text='%d%%' % round(frac * 100))
+                    elif msg.startswith('@@TICK '):
+                        # 21.10: пульс длинного этапа — полоска не двигается
+                        # (этапы считает оркестратор), но в статусе видно,
+                        # что прогон жив и сколько уже идёт этап.
+                        try:
+                            sec = int(msg.split()[1])
+                        except (IndexError, ValueError):
+                            sec = 0
+                        self.status.configure(
+                            text='этап %s идёт %d сек...' %
+                                 (getattr(self, '_cur_stage', '?'), sec))
                 except Exception:
                     pass
                 continue
@@ -1081,6 +1106,12 @@ class App(ctk.CTk):
         cfg['skip_tables'] = [t.strip() for t in self.e_skip.get().split(',') if t.strip()]
         # 21.10: галочка обновления существующих секций
         cfg['tables_update_existing'] = bool(self.v_tupd.get())
+        # 21.10: лимит этапа (минуты, 0 = без лимита)
+        try:
+            cfg.setdefault('safety', {})['stage_timeout_min'] = \
+                max(0.0, float(self.e_tmo.get().replace(',', '.') or 15))
+        except ValueError:
+            pass
         # 21.10: секции import/code больше не расходятся с галочками этапов
         cfg['import']['enabled'] = bool(self.stage_vars['import'].get())
         cfg['code']['enabled'] = bool(self.stage_vars['code'].get())
@@ -1191,6 +1222,10 @@ class App(ctk.CTk):
         self.t_excl.insert('1.0', chr(10).join(self.cfg.get('import', {}).get('exclude_paths', [])))
         # 20.09: перехват игровых моделей — восстановление из конфига
         self.v_override.set(self.cfg.get('import', {}).get('allow_override', True))
+        # 21.10: лимит этапа — восстановление из конфига
+        tmo = self.cfg.get('safety', {}).get('stage_timeout_min', 15)
+        self.e_tmo.delete(0, 'end')
+        self.e_tmo.insert(0, ('%g' % tmo) if isinstance(tmo, (int, float)) else str(tmo))
         g = self.cfg.get('gui', {})
         self.v_sound.set(g.get('sound_on_done', False))
         self.v_autolog.set(g.get('autolog', False))
@@ -2092,8 +2127,12 @@ class App(ctk.CTk):
             sid, t = tree.item(item, 'values')[0], tree.item(item, 'values')[1]
             del_list.setdefault(t, []).append(sid)
         tgt = st['dir']
-        log_dir = os.path.join(self._cfg_dir(), 'logs')
-        bdir = os.path.join(self._cfg_dir(), 'transfer_backup', 'cleanup')
+        # 21.10: пути чистки настраиваемые (cleanup.log_dir/backup_dir),
+        # дефолт прежний: logs/ и transfer_backup/cleanup у конфига
+        ccfg = self.cfg.get('cleanup', {})
+        sbd = self.cfg.get('safety', {}).get('backup_dir', 'transfer_backup')
+        log_dir = ccfg.get('log_dir') or os.path.join(self._cfg_dir(), 'logs')
+        bdir = ccfg.get('backup_dir') or os.path.join(self._cfg_dir(), sbd, 'cleanup')
         self._log('>>> Чистка: %s %d объектов ...' % ('демо' if dry else 'удаление', len(sel)))
 
         def work():
@@ -2137,7 +2176,10 @@ class App(ctk.CTk):
         # 20.10 (аудит): починка большого набора таблиц в фоне (UI не морозим)
         self._log('>>> Починка: %s ...' % ('скан' if first else 'применение'))
         cfgp = self._cfg_path()
-        bdir = os.path.join(self._cfg_dir(), 'transfer_backup', 'repair')
+        # 21.10: пути починки настраиваемые (repair.backup_dir/log_dir)
+        rcfg = self.cfg.get('repair', {})
+        sbd = self.cfg.get('safety', {}).get('backup_dir', 'transfer_backup')
+        bdir = rcfg.get('backup_dir') or os.path.join(self._cfg_dir(), sbd, 'repair')
 
         def work():
             return sr.repair(tgt, None, bdir, do=not first, cfgp=cfgp)
@@ -2151,7 +2193,7 @@ class App(ctk.CTk):
                     self._repair_ran = True
                     self._log('>>> Починка: скан — найдено %d проблем. Запусти ещё раз для применения (бэкап + лог).' % total, 'warn')
                 else:
-                    ldir = os.path.join(self._cfg_dir(), 'logs')
+                    ldir = rcfg.get('log_dir') or os.path.join(self._cfg_dir(), 'logs')
                     os.makedirs(ldir, exist_ok=True)
                     lp = os.path.join(ldir, 'repair-%s.md' % time.strftime('%Y-%m-%d'))
                     io.open(lp, 'ab').write((chr(10).join(lines) + chr(10) + chr(10)).encode('utf-8'))
@@ -2476,7 +2518,8 @@ class App(ctk.CTk):
         # 20.10: базовый режим (hex/dec/both/jhex) без префикса rawc_
         self.cfg['rawconv']['last_mode'] = base_mode
         self._save_cfg()
-        bdir = os.path.join(self._cfg_dir(), 'transfer_backup', 'rawconv')
+        bdir = self.cfg.get('rawconv', {}).get('backup_dir') or \
+            os.path.join(self._cfg_dir(), 'transfer_backup', 'rawconv')
 
         def work():
             # 20.10: lines инициализируется ВСЕГДА — раньше при исключении

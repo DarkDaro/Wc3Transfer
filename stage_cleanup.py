@@ -436,7 +436,12 @@ if __name__ == '__main__':
     elif '--delete' in ap:
         dp = os.path.join(here, 'cleanup_delete.json')
         dl = json.load(io.open(dp, 'rb'))
-        lines = delete(tgt, dl, cfg.get('log_dir') or os.path.join(here, 'logs'),
-                       os.path.join(here, cfg['safety']['backup_dir'], 'cleanup'))
+        # 21.10: пути чистки настраиваемые и рядом с конфигом (консистентно
+        # с пайплайном переноса): cleanup.log_dir / cleanup.backup_dir,
+        # иначе logs/ и safety.backup_dir/cleanup у конфига.
+        ccfg = cfg.get('cleanup', {})
+        ldir = ccfg.get('log_dir') or cfg.get('log_dir') or os.path.join(here, 'logs')
+        broot = ccfg.get('backup_dir') or os.path.join(here, cfg['safety']['backup_dir'], 'cleanup')
+        lines = delete(tgt, dl, ldir, broot)
         for l in lines:
             print(l)

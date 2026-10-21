@@ -1,8 +1,8 @@
 {
   "_comment": "Конфиг переноса объектов между lni-картами. Заполнить под пару карт, затем: python transfer_run.py --plan",
-  "source": "",
-  "target": "",
-  "name": "",
+  "source": "C:/AgentLetta/BVO3.2",
+  "target": "C:/AgentLetta/LOWSTOBVO",
+  "name": "LOWSBVO",
   "tables": [
     "unit",
     "ability",
@@ -100,7 +100,8 @@
     "backup_dir": "transfer_backup",
     "state_file": "transfer_state.json",
     "dry_run_first": true,
-    "stop_on_error": true
+    "stop_on_error": true,
+    "stage_timeout_min": 60
   },
   "deps": {
     "roots": [],
@@ -119,7 +120,7 @@
     "tables": true,
     "import": true,
     "code": true,
-    "code_cut": true,
+    "code_cut": false,
     "geometry": false,
     "testspawn": false,
     "verify": true,

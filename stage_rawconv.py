@@ -356,5 +356,15 @@ if __name__ == '__main__':
     else:
         mode = 'both'
     here = os.path.dirname(os.path.abspath(__file__))
-    for l in run(tgt, os.path.join(here, 'transfer_backup', 'rawconv'), apply=do, mode=mode):
+    # 21.10: бэкап конвертера настраиваемый: --backup-dir X, иначе
+    # рядом с картой (_transfer_backup/rawconv), а не у скрипта.
+    bdir = None
+    if '--backup-dir' in sys.argv:
+        i = sys.argv.index('--backup-dir')
+        bdir = os.path.abspath(sys.argv[i + 1])
+        del sys.argv[i:i + 2]
+    if not bdir:
+        base = os.path.dirname(os.path.abspath(tgt))
+        bdir = os.path.join(base, 'transfer_backup', 'rawconv')
+    for l in run(tgt, bdir, apply=do, mode=mode):
         print(l)

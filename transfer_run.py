@@ -7,7 +7,7 @@
 #   python transfer_run.py --rollback        # откат к последнему успешному этапу
 #   python transfer_run.py --status          # состояние (state)
 # Этапы: mapping -> registry -> deps -> tables -> import -> code -> geometry -> verify
-import io, os, sys, json, hashlib, shutil, time
+import io, os, sys, json, hashlib, shutil, time, threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # 17.09: конфиг можно указать аргументом (--config X.json) — несколько
@@ -64,25 +64,30 @@ def save_state(cfg, st):
     io.open(os.path.join(cfg_dir(), cfg['safety']['state_file']), 'wb').write(
         json.dumps(st, indent=2, ensure_ascii=False).encode('utf-8'))
 
+_log_lock = threading.Lock()
+
 def log(cfg, msg):
     # 21.10: машинные маркеры прогресса идут в stdout без метки времени
     # и не засоряют журнал. GUI читает их как есть.
-    if msg.startswith('@@'):
-        print(msg)
-        return
-    d = cfg.get('log_dir') or os.path.join(cfg_dir(), 'logs')
-    if d and os.path.isdir(d) is False:
-        os.makedirs(d, exist_ok=True)
-    line = '%s  %s' % (time.strftime('%Y-%m-%d %H:%M:%S'), msg)
-    print(line)
-    if d:
-        # 20.10: журнал на КОНФИГ (пара карт), а не один общий:
-        # разные конфиги не перемешивают сессии друг с другом.
-        # Для дефолтного конфига имя прежнее (transfer.log).
-        stem = os.path.splitext(os.path.basename(CFG_PATH))[0]
-        fname = 'transfer.log' if stem == 'transfer_config' else stem + '.log'
-        with io.open(os.path.join(d, fname), 'ab') as f:
-            f.write(line.encode('utf-8') + b'\n')
+    # 21.10: печать под замком — пульс @@TICK идёт из фонового потока
+    # и не должен перемешиваться с выводом основного потока.
+    with _log_lock:
+        if msg.startswith('@@'):
+            print(msg)
+            return
+        d = cfg.get('log_dir') or os.path.join(cfg_dir(), 'logs')
+        if d and os.path.isdir(d) is False:
+            os.makedirs(d, exist_ok=True)
+        line = '%s  %s' % (time.strftime('%Y-%m-%d %H:%M:%S'), msg)
+        print(line)
+        if d:
+            # 20.10: журнал на КОНФИГ (пара карт), а не один общий:
+            # разные конфиги не перемешивают сессии друг с другом.
+            # Для дефолтного конфига имя прежнее (transfer.log).
+            stem = os.path.splitext(os.path.basename(CFG_PATH))[0]
+            fname = 'transfer.log' if stem == 'transfer_config' else stem + '.log'
+            with io.open(os.path.join(d, fname), 'ab') as f:
+                f.write(line.encode('utf-8') + b'\n')
 
 def fhash(p):
     return hashlib.md5(io.open(p, 'rb').read()).hexdigest()
@@ -162,30 +167,72 @@ def run_stage(cfg, stage, dry):
     # 18.09: --allow-b для этапа code (замена B-литералов-баффов)
     if stage == 'code' and (cfg.get('code', {}).get('allow_b') or '--allow-b' in sys.argv):
         args.append('--allow-b')
-    # 20.09: тайминг этапа в лог + защитный timeout (15 мин).
-    # Причина: антивирусный stall на спавне python после записи
-    # пачки файлов (code_cut no-op висел 8.4 мин) — теперь это
-    # видно в логе, а зависший этап не тянет прогон вечно.
-    t0 = time.time()
+    # 20.09: тайминг этапа в лог + защитный timeout. Причина: антивирусный
+    # stall на спавне python после записи пачки файлов (code_cut no-op
+    # висел 8.4 мин) — теперь это видно в логе, а зависший этап не тянет
+    # прогон вечно.
+    # 21.10: лимит настраивается (safety.stage_timeout_min, минуты,
+    # 0 = без лимита). Жёсткие 15 мин убивали рабочий этап на больших
+    # картах (geometry с тысячами дор-объектов).
     try:
-        r = subprocess.run(args, capture_output=True, text=True,
-                           encoding='utf-8', errors='replace', timeout=900)
-    except subprocess.TimeoutExpired:
-        log(cfg, 'ЭТАП %s: ПРЕВЫШЕН ЛИМИТ 15 мин — убит' % stage)
+        tmo = float(cfg.get('safety', {}).get('stage_timeout_min', 15)) * 60
+    except (TypeError, ValueError):
+        tmo = 900.0
+    t0 = time.time()
+    import subprocess, threading
+    try:
+        p = subprocess.Popen(args, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True,
+                             encoding='utf-8', errors='replace', cwd=HERE)
+    except OSError as e:
+        log(cfg, 'ЭТАП %s: не запущен (%s)' % (stage, e))
         return 'fail'
+    killed = {'flag': False}
+
+    def _kill():
+        killed['flag'] = True
+        try:
+            p.kill()
+        except Exception:
+            pass
+
+    killer = threading.Timer(tmo, _kill) if tmo > 0 else None
+    if killer:
+        killer.daemon = True
+        killer.start()
+    # 21.10: пульс для GUI — длинный этап не выглядит зависшим,
+    # полоска стоит на текущем этапе, а в статусе видно время.
+    beat_stop = {'flag': False}
+
+    def _beat():
+        while not beat_stop['flag']:
+            time.sleep(20)
+            if beat_stop['flag']:
+                break
+            log(cfg, '@@TICK %d' % int(time.time() - t0))
+
+    bt = threading.Thread(target=_beat)
+    bt.daemon = True
+    bt.start()
+    out = p.communicate()[0] or ''
+    beat_stop['flag'] = True
+    if killer:
+        killer.cancel()
     dt = time.time() - t0
-    out = (r.stdout or '') + (r.stderr or '')
+    if killed['flag']:
+        log(cfg, 'ЭТАП %s: ПРЕВЫШЕН ЛИМИТ %g мин — убит' % (stage, tmo / 60.0))
+        return 'fail'
     if out.strip():
         # 20.10: при ошибке показываем больше строк — раньше трейсбек
         # обрезался до 30 строк и причина падения терялась.
-        tail = 100 if r.returncode != 0 else 30
+        tail = 100 if p.returncode != 0 else 30
         for l in out.splitlines()[-tail:]:
             log(cfg, '  | ' + l)
     # 20.09: этап дольше 2 сек — показать время (аномалии сразу видны)
     if dt > 2:
         log(cfg, 'ЭТАП %s: %.1f сек' % (stage, dt))
-    if r.returncode != 0:
-        log(cfg, 'ЭТАП %s: ОШИБКА (код %d)' % (stage, r.returncode))
+    if p.returncode != 0:
+        log(cfg, 'ЭТАП %s: ОШИБКА (код %d)' % (stage, p.returncode))
         return 'fail'
     return 'ok'
 
@@ -226,6 +273,10 @@ def main():
         print('Пара:', st.get('pair', '?'))
         print('Пройдено этапов:', st.get('completed', []))
         print('Последний успешный:', st.get('last_ok_stage'))
+        # 21.10: последний ЗАПУЩЕННЫЙ этап (не успел завершиться — тут)
+        if st.get('last_stage'):
+            print('Последний запущенный:', st.get('last_stage'),
+                  '(%s)' % st.get('last_stage_ts', '?'))
         return
 
     if args.reset:
@@ -351,6 +402,12 @@ def main():
                     files = target_files(cfg, s)
                     if files and not args.dry_run:
                         snapshot(cfg, s, files)
+                    if not args.dry_run:
+                        # 21.10: state пишется и ДО этапа — по нему видно,
+                        # на каком этапе процесс убили (таймаут, падение GUI)
+                        st['last_stage'] = s
+                        st['last_stage_ts'] = time.strftime('%Y-%m-%d %H:%M:%S')
+                        save_state(cfg, st)
                     r = run_stage(cfg, s, args.dry_run)
                     if r == 'fail' and cfg['safety']['stop_on_error']:
                         log(cfg, 'ОСТАНОВКА на этапе %s' % s)
@@ -384,6 +441,11 @@ def main():
             files = target_files(cfg, s)
             if files and not args.dry_run:
                 snapshot(cfg, s, files)
+            if not args.dry_run:
+                # 21.10: state и ДО этапа — видно, где убило (см. --loop)
+                st['last_stage'] = s
+                st['last_stage_ts'] = time.strftime('%Y-%m-%d %H:%M:%S')
+                save_state(cfg, st)
             r = run_stage(cfg, s, args.dry_run)
             if r == 'fail' and cfg['safety']['stop_on_error'] and not args.dry_run:
                 log(cfg, 'ОСТАНОВКА на этапе %s. Откат: --rollback' % s)

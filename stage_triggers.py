@@ -457,7 +457,11 @@ def main():
         # удалено, БЕЗ записи в карту и без бэкапа
         DRY = '--dry' in sys.argv
         stamp = time.strftime('%Y-%m-%d_%H%M%S')
-        bdir = os.path.join(here, cfg['safety']['backup_dir'], 'triggers', stamp)
+        # 21.10: пути чистки триггеров настраиваемые и рядом с конфигом
+        # (консистентно с пайплайном): trigclean.log_dir / trigclean.backup_dir
+        tcfg = cfg.get('trigclean', {})
+        broot = tcfg.get('backup_dir') or os.path.join(here, cfg['safety']['backup_dir'], 'triggers')
+        bdir = os.path.join(broot, stamp)
         if not DRY:
             os.makedirs(bdir, exist_ok=True)
         log = ['# %s триггеров %s' % ('ДЕМО (без записи):' if DRY else 'Чистка',
@@ -649,8 +653,10 @@ def main():
         log.append('ИТОГО %s: %d' % ('будет удалено (ДЕМО)' if DRY else 'удалено', total))
         if not DRY:
             log.append('Бэкап: %s' % bdir)
-        os.makedirs(os.path.join(here, 'logs'), exist_ok=True)
-        lp = os.path.join(here, 'logs', 'triggers-%s%s.md'
+        # 21.10: лог чистки тоже настраиваемый и рядом с конфигом
+        ldir = tcfg.get('log_dir') or cfg.get('log_dir') or os.path.join(here, 'logs')
+        os.makedirs(ldir, exist_ok=True)
+        lp = os.path.join(ldir, 'triggers-%s%s.md'
                           % (time.strftime('%Y-%m-%d'), '-demo' if DRY else ''))
         io.open(lp, 'ab').write(('\n'.join(log) + '\n\n').encode('utf-8'))
         # 19.09 (вечер): путь к логу отдельной строкой (GUI откроет его)
