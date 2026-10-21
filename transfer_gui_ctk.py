@@ -352,10 +352,12 @@ class App(ctk.CTk):
     def _cfg_dir(self):
         return os.path.dirname(os.path.abspath(self._cfg_path()))
 
-    def _run_streamed(self, cmd, prefix='  '):
+    def _run_streamed(self, cmd, prefix='  ', on_line=None):
         """21.10: потоковый запуск инструмента — вывод идёт в журнал
         ПОСТРОЧНО. Раньше подокна собирали вывод subprocess.run до конца:
-        GUI молчал минуты на тяжёлом скане. Возвращает (код, текст)."""
+        GUI молчал минуты на тяжёлом скане. Возвращает (код, текст).
+        21.10: on_line(строка) -> True — строка поглощена коллбэком
+        (например @@TRIG маркеры), она не идёт в lines и в журнал."""
         env = {**os.environ, 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8'}
         flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
         try:
@@ -370,6 +372,8 @@ class App(ctk.CTk):
         for ln in p.stdout:
             ln = ln.rstrip()
             if not ln:
+                continue
+            if on_line is not None and on_line(ln):
                 continue
             lines.append(ln)
             low = ln.lower()
@@ -1654,18 +1658,34 @@ class App(ctk.CTk):
         self._log('>>> Чистка триггеров: скан %s' % tgt)
         tree = self._trigclean_state['tree']
         tree.delete(*tree.get_children())
+        # 21.10: накопитель для маркеров @@TRIG — дерево наполнится
+        # по ходу скана, финальный показ вставку не дублирует
+        self._trigclean_state['acc'] = {}
+        self._trigclean_state['filled'] = False
         # 21.10: секундный таймер — окно показывает «скан идёт: N сек»
         stop_beat = {'f': False}
         threading.Thread(target=self._win_beat, daemon=True,
                          args=(win, lbl, 'скан идёт', stop_beat)).start()
 
         def work():
+            def on_line(ln):
+                # 21.10: маркеры @@TRIG вливаются в дерево налету;
+                # в журнал их не пропускаем (как @@TICK)
+                if not ln.startswith('@@TRIG '):
+                    return False
+                try:
+                    payload = json.loads(ln[7:])
+                except Exception:
+                    return True
+                self._safe_after(win, lambda p=payload: self._trigclean_fill(p))
+                return True
             try:
                 # 20.10: --dir — чистим именно ту карту, что в поле окна
                 # 21.10: стрим — вывод этапа в журнал вживую
                 code, out = self._run_streamed(
                     [sys.executable, '-u', os.path.join(HERE, 'stage_triggers.py'),
-                     CFG, '--dir', tgt, '--scan', opath])
+                     CFG, '--dir', tgt, '--scan', opath],
+                    on_line=on_line)
             except Exception as e:
                 code, out = 1, str(e)
             finally:
@@ -1673,6 +1693,67 @@ class App(ctk.CTk):
             self._safe_after(win, lambda: self._trigclean_show(
                 code, out, tgt, opts))
         threading.Thread(target=work, daemon=True).start()
+
+    def _trigclean_add(self, tree, res):
+        """21.10: вставка строк скана в дерево (общий блок show и филлера
+        инкрементального дерева). Возвращает число вставленных строк."""
+        n = 0
+        for rel in res.get('empty_txt', []):
+            # 20.10 (аудит): iid = ПОЛНЫЙ относительный путь — раньше(delete)
+            # сопоставлял по basename и при одинаковых именах .txt в разных
+            # папках удалял первую попавшуюся
+            try:
+                tree.insert('', 'end', iid=rel,
+                            values=('', os.path.basename(rel), '0', 'пустой .txt'))
+            except Exception:
+                pass
+            n += 1
+        for rel in res.get('empty_dirs', []):
+            tree.insert('', 'end', values=('', rel, '', 'пустая папка'))
+            n += 1
+        for tr in res.get('disabled', []):
+            why = ','.join(tr.get('flags', []))
+            if tr.get('used_by'):
+                why += ' | ИСПОЛЬЗУЕТСЯ: ' + ', '.join(tr['used_by'][:3])
+            if tr.get('note'):
+                why += ' | ' + tr['note']
+            tree.insert('', 'end', values=(tr.get('cat_disk', ''), tr.get('disk', ''),
+                                           tr.get('size', 0), why))
+            n += 1
+        for g in res.get('globals_unused', []):
+            tree.insert('', 'end', values=('глобалка', g, '', 'не упоминается в коде'))
+            n += 1
+        for name, rels in sorted(res.get('dead_funcs', {}).items()):
+            tree.insert('', 'end', values=(os.path.dirname(rels[0]) if rels else '', name,
+                                           '', 'мёртвая функция: ' + (', '.join(os.path.basename(r) for r in rels[:2]))))
+            n += 1
+        return n
+
+    def _trigclean_fill(self, payload):
+        """21.10: вливание куска результата скана (@@TRIG маркер) в дерево
+        по ходу — строки появляются сразу, а не разом в конце."""
+        st = getattr(self, '_trigclean_state', None)
+        if not st:
+            return
+        tree = st.get('tree')
+        if tree is None:
+            return
+        try:
+            if not tree.winfo_exists():
+                return
+        except Exception:
+            return
+        acc = st.setdefault('acc', {})
+        st['filled'] = True
+        # dead_funcs приходят кусками — сливаем в накопитель, в дерево
+        # вставляем только этот кусок (сортировку общего списка делает show
+        # при unfilled-пути; инкрементально строки идут в порядке кусков)
+        for k, v in payload.items():
+            if k == 'dead_funcs':
+                acc.setdefault('dead_funcs', {}).update(v)
+            else:
+                acc[k] = v
+        self._trigclean_add(tree, payload)
 
     def _trigclean_show(self, code, out, tgt, opts):
         st = getattr(self, '_trigclean_state', None)
@@ -1701,35 +1782,19 @@ class App(ctk.CTk):
             lbl.configure(text='нет результатов')
             self._log('>>> Скан триггеров: не прочитан результат: %s' % e, 'err')
             return
-        self._trigclean_state['scan'] = res
         self._trigclean_state['dir'] = tgt
-        n = 0
-        for rel in res.get('empty_txt', []):
-            # 20.10 (аудит): iid = ПОЛНЫЙ относительный путь — раньше(delete)
-            # сопоставлял по basename и при одинаковых именах .txt в разных
-            # папках удалял первую попавшуюся
-            tree.insert('', 'end', iid=rel,
-                        values=('', os.path.basename(rel), '0', 'пустой .txt'))
-            n += 1
-        for rel in res.get('empty_dirs', []):
-            tree.insert('', 'end', values=('', rel, '', 'пустая папка'))
-            n += 1
-        for tr in res.get('disabled', []):
-            why = ','.join(tr.get('flags', []))
-            if tr.get('used_by'):
-                why += ' | ИСПОЛЬЗУЕТСЯ: ' + ', '.join(tr['used_by'][:3])
-            if tr.get('note'):
-                why += ' | ' + tr['note']
-            tree.insert('', 'end', values=(tr.get('cat_disk', ''), tr.get('disk', ''),
-                                           tr.get('size', 0), why))
-            n += 1
-        for g in res.get('globals_unused', []):
-            tree.insert('', 'end', values=('глобалка', g, '', 'не упоминается в коде'))
-            n += 1
-        for name, rels in sorted(res.get('dead_funcs', {}).items()):
-            tree.insert('', 'end', values=(os.path.dirname(rels[0]) if rels else '', name,
-                                           '', 'мёртвая функция: ' + (', '.join(os.path.basename(r) for r in rels[:2]))))
-            n += 1
+        if st.get('filled'):
+            # 21.10: дерево уже наполнено по ходу скана (маркеры @@TRIG,
+            # филлер _trigclean_fill). Вставку не дублируем: сводим итог
+            # из накомленных кусков и ставим счётчик.
+            res = st.get('acc') or res
+            self._trigclean_state['scan'] = res
+            n = (len(res.get('empty_txt', [])) + len(res.get('empty_dirs', []))
+                 + len(res.get('disabled', [])) + len(res.get('globals_unused', []))
+                 + len(res.get('dead_funcs', {})))
+        else:
+            self._trigclean_state['scan'] = res
+            n = self._trigclean_add(tree, res)
         lbl.configure(text='найдено: %d' % n)
         self._log('>>> Чистка триггеров: скан %s — найдено %d' % (tgt, n), 'ok')
 

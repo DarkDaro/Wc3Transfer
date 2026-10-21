@@ -465,6 +465,10 @@ def main():
             print('    пустых папок: %d, txt: %d' % (len(ed), len(et)))
             res['empty_dirs'] = [os.path.relpath(p, tgt) for p in ed]
             res['empty_txt'] = [os.path.relpath(p, tgt) for p in et]
+            # 21.10: маркер для GUI — дерево наполняется по ходу скана
+            print('@@TRIG ' + json.dumps({'empty_dirs': res['empty_dirs'],
+                                          'empty_txt': res['empty_txt']},
+                                         ensure_ascii=False))
         if opts.get('disabled', True) or opts.get('closed', False) or opts.get('comments', False):
             res['disabled'] = scan_disabled(tgt, opts.get('closed', False),
                                             opts.get('del_notes', False),
@@ -472,12 +476,16 @@ def main():
                                             comments=opts.get('comments', False),
                                             exclude=exclude)
             print('    отключённых: %d' % len(res.get('disabled', [])))
+            print('@@TRIG ' + json.dumps({'disabled': res['disabled']},
+                                         ensure_ascii=False))
         if opts.get('globals', False):
             print('  шаг: глобалки...')
             un, us = scan_globals(tgt, files)
             print('    unused: %d, used: %d' % (len(un), len(us)))
             res['globals_unused'] = un
             res['globals_used'] = us
+            print('@@TRIG ' + json.dumps({'globals_unused': un},
+                                         ensure_ascii=False))
         if opts.get('dead_funcs', False):
             print('  шаг: мёртвые функции...')
             dfd = scan_dead_funcs(tgt, opts.get('cascade', True),
@@ -486,6 +494,13 @@ def main():
             print('    мёртвых: %d' % len(dfd))
             res['dead_funcs'] = {n: [os.path.relpath(f, tgt) for f in fps]
                                  for n, fps in dfd.items()}
+            # 21.10: 4000+ строк циклично — маркер кусками по 1000,
+            # иначе одна json-строка на мегабайты тормозит её парсер
+            keys = sorted(res['dead_funcs'])
+            for k0 in range(0, len(keys), 1000):
+                chunk = {k: res['dead_funcs'][k] for k in keys[k0:k0 + 1000]}
+                print('@@TRIG ' + json.dumps({'dead_funcs': chunk},
+                                             ensure_ascii=False))
         outp = os.path.join(here, 'triggers_scan.json')
         wp(outp, json.dumps(res, ensure_ascii=False, indent=1))
         print('скан ->', outp)
