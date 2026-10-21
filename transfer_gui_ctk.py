@@ -1050,20 +1050,31 @@ class App(ctk.CTk):
         log_wrap = ctk.CTkFrame(li, fg_color="transparent")
         log_wrap.pack(fill="both", expand=True)
         dark = APPEARANCE == 'dark'
-        self.log = tk.Text(log_wrap, height=9, wrap="word", font=FONT_MONO,
-                           borderwidth=0, relief="flat",
-                           bg="#12151a" if dark else "#1e1e1e",
-                           fg="#c8d0da" if dark else "#d4d4d4",
-                           insertbackground="#e8edf4" if dark else "#ffffff",
-                           selectbackground=ACCENT, selectforeground="#ffffff")
-        log_sb = ctk.CTkScrollbar(log_wrap, command=self.log.yview)
-        self.log.configure(yscrollcommand=log_sb.set)
-        log_sb.pack(side="right", fill="y")
+        # 22.10 (B): журнал переведён на CTkTextbox — внешний вид в общей
+        # теме, встроенный скроллбар, автоскролл с уважением к прокрутке
+        self.log = ctk.CTkTextbox(log_wrap, height=9, wrap="word", font=FONT_MONO,
+                                  fg_color="#12151a" if dark else "#1e1e1e",
+                                  text_color="#c8d0da" if dark else "#d4d4d4",
+                                  border_width=0, corner_radius=8)
         self.log.pack(side="left", fill="both", expand=True)
+        # делегирование методов tk.Text, которые не обёрнуты в CTkTextbox
+        tb = self.log._textbox
+        tb.configure(insertbackground="#e8edf4" if dark else "#ffffff",
+                     selectbackground=ACCENT, selectforeground="#ffffff")
+        self.log.search = tb.search
+        self.log.tag_configure = self.log.tag_config
         self.log.tag_configure("err", foreground="#ff6b6b")
         self.log.tag_configure("ok", foreground="#7ee787")
         self.log.tag_configure("warn", foreground="#e6a23c")
         self.log.tag_configure("found", background="#5a5a2e")
+        # 22.10 (B): «следить» = автоскролл, только если пользователь стоит
+        # у низа журнала; прокрутил вверх — вывод не уводит просмотр
+        self._log_follow = True
+        self.log.bind('<Configure>', lambda e: self._log_track_follow())
+        self.log._textbox.bind('<MouseWheel>', lambda e: self.after(10, self._log_track_follow), add='+')
+        self.log._textbox.bind('<Button-4>', lambda e: self.after(10, self._log_track_follow), add='+')
+        self.log._textbox.bind('<Button-5>', lambda e: self.after(10, self._log_track_follow), add='+')
+        self.log._textbox.bind('<KeyPress>', lambda e: self.after(10, self._log_track_follow), add='+')
 
         # --- прогресс-лента ---
         # 20.09: старые статусбар и прогресс-лента отсюда УДАЛЕНЫ —
@@ -1165,9 +1176,11 @@ class App(ctk.CTk):
 
     def _apply_log_theme(self):
         dark = ctk.get_appearance_mode().lower() == 'dark'
+        # 22.10 (B): CTkTextbox — цвета через CTk-атрибуты
         self.log.configure(
-            bg="#12151a" if dark else "#1e1e1e",
-            fg="#c8d0da" if dark else "#d4d4d4",
+            fg_color="#12151a" if dark else "#1e1e1e",
+            text_color="#c8d0da" if dark else "#d4d4d4")
+        self.log._textbox.configure(
             insertbackground="#e8edf4" if dark else "#ffffff")
 
     # ---------- прогресс ----------
@@ -1342,8 +1355,20 @@ class App(ctk.CTk):
                     pass
                 continue
             self.log.insert('end', msg + '\n', tag or ())
-            self.log.see('end')
+            # 22.10 (B): автоскролл — только когда пользователь у низа
+            try:
+                if self._log_follow:
+                    self.log.see('end')
+            except Exception:
+                pass
         self.after(100, self._poll_log)
+
+    def _log_track_follow(self):
+        """22.10 (B): обновить флаг автоскролла: у низа = следим."""
+        try:
+            self._log_follow = self.log.yview()[1] > 0.998
+        except Exception:
+            pass
 
     def _collect_cfg(self):
         cfg = self.cfg
