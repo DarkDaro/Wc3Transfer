@@ -473,26 +473,17 @@ class App(ctk.CTk):
         for s, v in self.stage_vars.items():
             for cb in self._stage_cbs.get(s, []):
                 cb.configure(state='disabled' if serv else 'normal')
-        # кнопки переноса
-        # 20.10 (аудит): + b_tspawn — TestSpawn в Обслуживании недоступен
-        # 22.10: b_manifest/b_triggers/b_tspawn переехали на вкладку
-        # Обслуживание и там были ПЕРМАНЕНТНО заблокированы (режим
-        # Обслуживания = их вкладка). Убраны из донорного disable:
-        # «Перенос триггеров» и TestSpawn берут донора из поля на
-        # вкладке Перенос прямо в своём окне, Манифест просто отчёт.
-        donor_btns = [self.b_plan, self.b_dry, self.b_run, self.b_loop,
-                      self.b_status, self.b_rollback, self.b_reset]
-        for b in donor_btns:
+        # кнопки переноса: единый список _donor_btns (собирается в _build),
+        # донорные под-операции живут на вкладке Перенос и блокируются вместе
+        # со всей строкой — донор в Обслуживании не задан
+        for b in getattr(self, '_donor_btns', []):
             try:
                 b.configure(state='disabled' if serv else 'normal')
             except Exception:
                 pass
-        # кнопки обслуживания — активны всегда, в обслуживании подсвечены
-        # 19.09 (вечер): + чистка триггеров (новая функция)
-        # 21.09: + конверт равкодов
-        # 22.10: border_color=None крашит CTk (проверка цвета) —
-        # подсветку ставим только в режиме Обслуживание
-        for b in (self.b_verify, self.b_cleanup, self.b_repair, self.b_trigclean, self.b_rawconv):
+        # кнопки обслуживания: единый список _svc_btns, активны всегда,
+        # в режиме Обслуживание подсвечены рамкой
+        for b in getattr(self, '_svc_btns', []):
             try:
                 if serv:
                     b.configure(border_width=2, border_color=ACCENT)
@@ -914,16 +905,10 @@ class App(ctk.CTk):
         self.e_rlog = srv_row('repair', 'log_dir', 'Починка, журнал:')
         self.e_rbak = srv_row('repair', 'backup_dir', 'Починка, бэкапы:')
         self.e_rvbak = srv_row('rawconv', 'backup_dir', 'Конверт, бэкапы:')
-        # лимит этапа дублируется здесь (зеркало левой колонки — читается
-        # из того же self.e_tmo при сборке конфига)
-        row_tmo2 = ctk.CTkFrame(pi7, fg_color="transparent")
-        row_tmo2.pack(fill="x", pady=(4, 0))
-        ctk.CTkLabel(row_tmo2, text='Лимит этапа, мин (0 = без лимита), поле «Опции» слева:',
-                     font=FONT_SMALL, anchor="w").pack(fill="x")
-        Tooltip(row_tmo2, 'Единое поле — на колонке этапов слева (self.e_tmo).\nЗдесь только напоминание, где лежит настройка.')
 
-        # --- кнопки (22.10 (UI): на вкладке Перенос; кнопки обслуживания
-        # переехали на вкладку Обслуживание через ab_svc) ---
+        # 22.10: обе группы кнопок прогона — две ровные строки на вкладке
+        # Перенос; донорные под-операции («Триггеры...», TestSpawn) здесь же,
+        # они зависят от донора и логически относятся к переносу
         btns = ctk.CTkFrame(tab_t, fg_color="transparent")
         btns.pack(fill="x", padx=10, pady=4)
 
@@ -958,16 +943,34 @@ class App(ctk.CTk):
         # 19.09: пересчёт маппинга под текущую пару карт
         self.b_remap = ab(btns, "Переписать маппинг", lambda: self._run(['--remap']),
            "Пересчитать реестр занятых ID приёмника и маппинг\nпод ТЕКУЩУЮ пару карт. Запускай после смены\nисточника/приёмника — иначе маппинг останется\nот старой карты (риск коллизий ID).")
-        self.b_run = ab(btns, "ЗАПУСК (запись!)", self._run_all,
+
+        # 22.10 (рефактор A): вторая строка — боевые команды и донорные
+        # под-операции («Перенос триггеров», TestSpawn): они берут донора
+        # из поля «Карта-донор», потому живут на вкладке Перенос
+        btns2 = ctk.CTkFrame(tab_t, fg_color="transparent")
+        btns2.pack(fill="x", padx=10, pady=(0, 4))
+        self.b_run = ab(btns2, "ЗАПУСК (запись!)", self._run_all,
            "Боевой прогон с записью в приёмник. Снапшоты делаются автоматически,\nоткат — кнопка «Откат».", color='danger', w=170)
-        self.b_loop = ab(btns, "Полный цикл (повторы)", self._run_loop,
+        self.b_loop = ab(btns2, "Полный цикл (повторы)", self._run_loop,
            "deps->mapping->tables->import->code_cut повторами, пока код находит\nновые дамми (макс 5 итераций). Для переноса героев из монолита.", color='ok', w=150)
-        self.b_status = ab(btns, "Статус", lambda: self._run(['--status']),
+        self.b_status = ab(btns2, "Статус", lambda: self._run(['--status']),
            "Какие этапы уже пройдены (state).")
-        self.b_rollback = ab(btns, "Откат", lambda: self._run(['--rollback']),
+        self.b_rollback = ab(btns2, "Откат", lambda: self._run(['--rollback']),
            "Восстановить файлы из снапшота последнего этапа.")
-        self.b_reset = ab(btns, "Сброс прогресса", lambda: self._run(['--reset']),
+        self.b_reset = ab(btns2, "Сброс прогресса", lambda: self._run(['--reset']),
            "Сбросить список пройденных этапов (state).\nНужен после смены пары карт или для повторного прогона.\nState также сбрасывается АВТОМАТИЧЕСКИ при смене source/target.")
+        # 22.10 (рефактор A): перенос триггеров и TestSpawn — донорные
+        # операции, переехали с вкладки Обслуживание в строку переноса
+        self.b_triggers = ab(btns2, "Триггеры...", self._triggers_window,
+           "Отдельный перенос триггеров: выбрать подпапки\n(героев/системы) и перенести только их.\nЗапись по правилу v4: папки в корень trigger/.")
+        self.b_tspawn = ab(btns2, "TestSpawn .j", lambda: self._run(['--stage', 'testspawn']),
+           "Генерирует 90-TestSpawn.j: спавн перенесённых героев\n(точка из поля «Точка спавна», по умолчанию центр карты 0,0).\nВызов в игре: call ExecuteFunc(\"TestSpawn__I\").")
+
+        # 22.10 (рефактор A): вторая строка — боевые команды и донорные
+        # под-операции («Перенос триггеров», TestSpawn), они берут донора
+        # из поля «Карта-донор» и потому живут на вкладке Перенос
+        btns2 = ctk.CTkFrame(tab_t, fg_color="transparent")
+        btns2.pack(fill="x", padx=10, pady=(0, 4))
         self.b_manifest = ab_svc('Отчёты и прочее', "Манифест", self._manifest,
            "Отчёт о переносе в mdlog/transfer/ (что перенесено, конфликты ID).")
         self.b_verify = ab_svc('Проверка и чистка', "Верификация", self._verify_only,
@@ -976,17 +979,24 @@ class App(ctk.CTk):
            "Чистка карты: неиспользуемые объекты, битые равкоды,\nнеудаляемые способности (по суффиксу/равкоду).\n19.09: расстановка карты (war3map.doo/Units.doo) читается —\nюниты/декорации на карте не удаляются.\nСкан -> список -> подтверждение -> удаление. Никаких молчаливых удалений.")
         self.b_repair = ab_svc('Проверка и чистка', "Починить таблицы", self._repair_main,
            "Починка таблиц ПРИЁМНИКА (table/*.ini): self-parent,\nбитые _parent, дубли секций, разбаланс [=[ ]=],\n19.09: экранирование строк текста с [ вне блока,\nудаление обрывков описаний.\nПервый клик = скан, второй = починка (бэкап + лог).")
-        self.b_triggers = ab_svc('Триггеры и код', "Триггеры...", self._triggers_window,
-           "Отдельный перенос триггеров: выбрать подпапки\n(героев/системы) и перенести только их.\nЗапись по правилу v4: папки в корень trigger/.")
+        # 22.10 (рефактор A): «Триггеры...» и «TestSpawn .j» переехали
+        # в строку кнопок переноса (вкладка Перенос) — они донорные
         self.b_trigclean = ab_svc('Проверка и чистка', "Чистка триггеров...", self._trigclean_window,
            "Чистка триггеров карты: пустые папки, отключённые/\nзакрытые триггеры, неиспользуемые глобалки,\nмёртвые функции. Скан -> список -> подтверждение -> удаление.")
         self.b_rawconv = ab_svc('Триггеры и код', "Конверт равкодов...", self._rawconv_window,
            "Разовый конверт 0xXXXXXXXX -> 'RAWC' (base-256) в скрипте карты.\nВход: файл .j или папка карты (ищет map/war3map.j, war3map.j,\ntrigger/code.j). Скан -> конверт (бэкап + лог замен).")
         self.b_deob = ab_svc('Триггеры и код', "Деобфускация имён...", self._deob_window,
            "Переименование обфусцированных идентификаторов (I/J/1, короткие\nВЕРХНИЕ) в читаемые по типам/семантике + восстановление\nформатирования. VERIFY: OK = токен-эквивалентность.\nВыход: <имя>_deobfuscated.j + rename_map.csv (карта переименований).")
-        self.b_tspawn = ab_svc('Триггеры и код', "TestSpawn .j", lambda: self._run(['--stage', 'testspawn']),
-           "Генерирует 90-TestSpawn.j: спавн перенесённых героев\n(точка из поля «Точка спавна», по умолчанию центр карты 0,0).\nВызов в игре: call ExecuteFunc(\"TestSpawn__I\").")
+        # 22.10 (рефактор A): TestSpawn переехал в строку кнопок переноса
         ab_svc('Отчёты и прочее', "Открыть папку", lambda: os.startfile(HERE))
+
+        # 22.10 (рефактор A): единые списки кнопок для _apply_mode —
+        # добавление новой кнопки не требует правки режима вручную
+        self._donor_btns = [self.b_plan, self.b_dry, self.b_remap, self.b_run,
+                            self.b_loop, self.b_status, self.b_rollback,
+                            self.b_reset, self.b_triggers, self.b_tspawn]
+        self._svc_btns = [self.b_verify, self.b_cleanup, self.b_repair,
+                          self.b_trigclean, self.b_rawconv]
 
         # --- статусбар ---
         # 22.10 (UI): перенесён выше вкладок (до них по порядку паковки).
