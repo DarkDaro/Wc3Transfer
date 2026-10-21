@@ -38,12 +38,12 @@
       "UI/"
     ],
     "check_missing_refs": true,
-    "allow_override": true
+    "allow_override": false
   },
   "ui": {
     "enabled": false,
     "_comment": "true ТОЛЬКО для полного переноса карты-источника как отдельного проекта",
-    "mode": "service"
+    "mode": "transfer"
   },
   "code": {
     "enabled": true,
@@ -73,7 +73,7 @@
     "recount_z": true
   },
   "testspawn": {
-    "enabled": false,
+    "enabled": true,
     "heroes": [
       "Hgam",
       "Hpal"
@@ -130,17 +130,24 @@
     "sound_on_done": true,
     "autolog": true,
     "log_font": 9,
-    "geometry": "1851x990+26+26",
-    "theme": "dark"
+    "geometry": "1851x1057+26+26",
+    "theme": "dark",
+    "path_history": {
+      "j": [
+        "",
+        ""
+      ]
+    }
   },
   "cleanup": {
-    "last_dir": "C:/AgentLetta/LOWSKEKCLEAR",
+    "last_dir": "C:/AgentLetta/LOWSTOBVO",
     "exclude_dirs": [],
     "suffix_patterns": [
       "(убрано)",
       "(Убрано)",
       "не используется"
-    ]
+    ],
+    "protect": true
   },
   "trigclean": {
     "empty_dirs": true,
@@ -155,11 +162,11 @@
     "comments": true
   },
   "rawconv": {
-    "last_path": "C:/AgentLetta/HOTS.j",
+    "last_path": "",
     "last_mode": "both"
   },
   "deob": {
-    "last_path": "C:/1/UFSCOPY.j"
+    "last_path": ""
   },
   "tables_update_existing": false,
   "repair": {}
