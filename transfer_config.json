@@ -101,7 +101,7 @@
     "state_file": "transfer_state.json",
     "dry_run_first": true,
     "stop_on_error": true,
-    "stage_timeout_min": 60
+    "stage_timeout_min": 60.0
   },
   "deps": {
     "roots": [],
@@ -130,7 +130,7 @@
     "sound_on_done": true,
     "autolog": true,
     "log_font": 9,
-    "geometry": "1851x1057+26+26",
+    "geometry": "1851x990+26+26",
     "theme": "dark"
   },
   "cleanup": {
@@ -161,5 +161,6 @@
   "deob": {
     "last_path": "C:/1/UFSCOPY.j"
   },
-  "tables_update_existing": false
+  "tables_update_existing": false,
+  "repair": {}
 }
