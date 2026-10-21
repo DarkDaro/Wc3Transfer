@@ -381,8 +381,13 @@ class App(ctk.CTk):
             ln = ln.rstrip()
             if not ln:
                 continue
-            if on_line is not None and on_line(ln):
-                continue
+            # 22.10 (аудит): коллбэк-сбой не должен хоронить весь поток —
+            # строка просто уходит в журнал, ошибка видна
+            try:
+                if on_line is not None and on_line(ln):
+                    continue
+            except Exception:
+                self.q.put(('коллбэк потока упал: %s' % sys.exc_info()[1], 'err', None))
             lines.append(ln)
             low = ln.lower()
             tag = 'err' if ('ошибка' in low or 'error' in low) else \
@@ -470,9 +475,13 @@ class App(ctk.CTk):
                 cb.configure(state='disabled' if serv else 'normal')
         # кнопки переноса
         # 20.10 (аудит): + b_tspawn — TestSpawn в Обслуживании недоступен
+        # 22.10: b_manifest/b_triggers/b_tspawn переехали на вкладку
+        # Обслуживание и там были ПЕРМАНЕНТНО заблокированы (режим
+        # Обслуживания = их вкладка). Убраны из донорного disable:
+        # «Перенос триггеров» и TestSpawn берут донора из поля на
+        # вкладке Перенос прямо в своём окне, Манифест просто отчёт.
         donor_btns = [self.b_plan, self.b_dry, self.b_run, self.b_loop,
-                      self.b_status, self.b_rollback, self.b_reset,
-                      self.b_manifest, self.b_triggers, self.b_tspawn]
+                      self.b_status, self.b_rollback, self.b_reset]
         for b in donor_btns:
             try:
                 b.configure(state='disabled' if serv else 'normal')
@@ -1513,12 +1522,14 @@ class App(ctk.CTk):
                         y = max(-40, min(y, sh - 320))
                         w2 = min(int(m.group(1)), sw - 40)
                         h2 = min(int(m.group(2)), sh - 90)
-                        self.minsize(min(1180, w2), min(900, h2))
+                        # 22.10: минимум согласован с вкладками (1000x620),
+                        # старые 1180x900 зажимали малое окно
+                        self.minsize(min(1000, w2), min(620, h2))
                         self.geometry('%dx%d+%d+%d' % (w2, h2, x, y))
                     else:
                         w2 = min(int(m.group(1)), self.winfo_screenwidth() - 40)
                         h2 = min(int(m.group(2)), self.winfo_screenheight() - 90)
-                        self.minsize(min(1180, w2), min(900, h2))
+                        self.minsize(min(1000, w2), min(620, h2))
                         self.geometry('%dx%d' % (w2, h2))
             except Exception:
                 pass
