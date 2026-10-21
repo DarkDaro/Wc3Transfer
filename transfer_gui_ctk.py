@@ -288,6 +288,11 @@ class App(ctk.CTk):
             self.after(300, self._apply_mode)
         self.protocol('WM_DELETE_WINDOW', self._on_close)
         self.after(100, self._poll_log)
+        # 22.10 (UI): горячие клавиши — вкладки и сохранение
+        for i, tabname in enumerate(('Перенос', 'Обслуживание', 'Журнал'), 1):
+            self.bind_all('<Control-Key-%d>' % i,
+                          lambda e, t=tabname: self._goto_tab(t))
+        self.bind_all('<Control-s>', lambda e: self._save_cfg())
 
     # ---------- построение UI ----------
 
@@ -415,6 +420,14 @@ class App(ctk.CTk):
         """after() из рабочего потока: окно могло быть закрыто."""
         try:
             win.after(0, fn)
+        except Exception:
+            pass
+
+    def _goto_tab(self, tabname):
+        """22.10 (UI): Ctrl+1/2/3 — открыть вкладку."""
+        try:
+            self.tabview.set(tabname)
+            self._on_tab()
         except Exception:
             pass
 
@@ -867,7 +880,7 @@ class App(ctk.CTk):
         Tooltip(self.e_tsrect, "center или пусто — спавн в центре карты (0, 0).\nИначе — имя региона (gg_rct_team_1_spawn).")
 
         # 7. Пути и лимиты (22.10): ключи, которые CLI-этапы берут из конфига
-        pf7, pi7 = self._card(right, "7. Пути и лимиты ( Обслуживание )")
+        pf7, pi7 = self._card(right, "7. Пути и лимиты (Обслуживание)")
         pf7.pack(fill="x", pady=4)
         ctk.CTkLabel(pi7, text="Пусто = путь по умолчанию (logs/ и transfer_backup/ у конфига).",
                      font=FONT_SMALL, anchor="w").pack(fill="x")
