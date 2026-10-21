@@ -45,14 +45,16 @@ def write_doo(recs, out_path):
 def read_w3e_heights(path):
     """Высоты рельефа приёмника: {(tx, ty): height_float} по центрам тайлов."""
     d = io.open(path, 'rb').read()
-    off = 0
+    # 21.10 (аудит): мёртвый черновик разбора заголовка оставлен
+    # закомментированным (ничего не удаляем), рабочий блок ниже.
+    # off = 0
     assert d[0:4] == b'W3E!'
-    off = 4
-    ver = int.from_bytes(d[off:off+4], 'little'); off += 4
-    off += 4  # saves
-    off += 4  # editor
-    ng = int.from_bytes(d[off:off+4], 'little'); off += 4 + ng*4
-    nc = int.from_bytes(d[off:off+4], 'little'); off += 4 + nc*4 if False else off
+    # off = 4
+    # ver = int.from_bytes(d[off:off+4], 'little'); off += 4
+    # off += 4  # saves
+    # off += 4  # editor
+    # ng = int.from_bytes(d[off:off+4], 'little'); off += 4 + ng*4
+    # nc = int.from_bytes(d[off:off+4], 'little'); off += 4 + nc*4 if False else off
     # аккуратно:
     off = 4 + 4 + 4 + 4
     ng = int.from_bytes(d[off:off+4], 'little'); off += 4

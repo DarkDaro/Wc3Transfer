@@ -6,7 +6,7 @@
 #   'custom_only': переносить ТОЛЬКО кастомные объекты (не стандарт источника)
 # Классификация: prebuilt приёмника (Custom/*.ini) = множество стандартных ID.
 # Выход: transfer_mapping.json + .pkl + mapping_report.txt (решения по объектам)
-import io, os, sys, json, re, pickle
+import io, os, sys, json, re, pickle, shutil, time
 
 def parse_sections(path):
     out = {}
@@ -95,9 +95,23 @@ def main():
     # Без этого --loop сдвигал ID между итерациями (deps растёт ->
     # сортировка меняется -> gen_id выдаёт ДРУГОЙ объекту ID, занятый
     # прошлой итерацией -> tables писал юнита ПОВТОРНО -> 3 копии героев).
+    # 21.10 (аудит): KEEP привязан к паре карт. Раньше после смены
+    # донора/приёмника подхватывались старые назначения — объекты
+    # получали ID от прошлой карты. --remap теперь ещё и --fresh.
+    fresh = '--fresh' in sys.argv
+    pair_p = os.path.join(here, 'mapping_pair.json')
+    pair_now = [os.path.normcase(os.path.abspath(src)),
+                os.path.normcase(os.path.abspath(cfg['target']))]
+    pair_old = None
+    if os.path.exists(pair_p):
+        try:
+            pair_old = json.load(io.open(pair_p, 'rb'))
+        except ValueError:
+            pair_old = None
+    same_pair = pair_old is None or pair_old == pair_now
     prev_p = os.path.join(here, cfg['mapping']['pkl'].replace('.pkl', '.json'))
     prev = {}
-    if os.path.exists(prev_p):
+    if os.path.exists(prev_p) and same_pair and not fresh:
         prev = json.load(io.open(prev_p, 'rb'))
         kept = 0
         for k, v in prev.items():
@@ -107,6 +121,12 @@ def main():
             kept += 1
         if kept:
             report.append('KEEP: %d прежних назначений сохранено (инкрементально)' % kept)
+    elif pair_old is not None and not same_pair:
+        report.append('ПАРА КАРТ ИЗМЕНИЛАСЬ — прежний маппинг не используется')
+        print('маппинг: пара карт изменилась — прежние назначения не беру')
+    elif fresh:
+        report.append('--remap: маппинг пересобран с нуля')
+        print('маппинг: --remap — прежние назначения не беру')
 
     counter = [0]
     for t in cfg['tables']:
@@ -159,15 +179,30 @@ def main():
     # папка утилиты, не приёмник; без записи tables в dry-run
     # берёт СТАРЫЙ маппинг и показывает мусор)
     mp_json = os.path.join(here, cfg['mapping']['pkl'].replace('.pkl', '.json'))
+    # 21.10: при смене пары/--remap старые рабочие файлы не затираем
+    # молча — складываем в архив рядом с бэкапами.
+    if fresh or (pair_old is not None and not same_pair):
+        adir = os.path.join(here, cfg.get('safety', {}).get(
+                            'backup_dir', 'transfer_backup'),
+                            'mapping_%s_%d' % (
+                                time.strftime('%Y%m%d-%H%M%S'), time.time_ns()))
+        os.makedirs(adir, exist_ok=True)
+        for p in (mp_json, os.path.join(here, cfg['mapping']['pkl']),
+                  os.path.join(here, 'replace_std.json')):
+            if os.path.exists(p):
+                shutil.copy2(p, os.path.join(adir, os.path.basename(p)))
+        print('старый маппинг сохранён в архив:', adir)
     io.open(mp_json, 'wb').write(json.dumps(
         {'%s:%s' % k: v for k, v in mapping.items()},
         indent=1, ensure_ascii=False).encode('utf-8'))
     with open(os.path.join(here, cfg['mapping']['pkl']), 'wb') as pf:
         pickle.dump({'table': dict(mapping)}, pf)
-    if replace_std:
-        io.open(os.path.join(here, 'replace_std.json'), 'wb').write(json.dumps(
-            {'%s:%s' % k: v for k, v in replace_std.items()},
-            indent=1, ensure_ascii=False).encode('utf-8'))
+    # 21.10: replace_std перезаписываем ВСЕГДА (пустой тоже), иначе
+    # после смены донора применялись поля прошлой карты.
+    io.open(os.path.join(here, 'replace_std.json'), 'wb').write(json.dumps(
+        {'%s:%s' % k: v for k, v in replace_std.items()},
+        indent=1, ensure_ascii=False).encode('utf-8'))
+    io.open(pair_p, 'wb').write(json.dumps(pair_now, ensure_ascii=False).encode('utf-8'))
     io.open(os.path.join(here, 'mapping_report.txt'), 'wb').write(
         chr(10).join(report).encode('utf-8'))
     print('маппинг: %d записей, replace_std: %d, отчёт: mapping_report.txt' % (len(mapping), len(replace_std)))

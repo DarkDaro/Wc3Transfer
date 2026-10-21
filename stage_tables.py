@@ -73,6 +73,38 @@ def replace_asset_paths(lines, renames):
         out.append(l)
     return out
 
+def prepare_fields(lines, table, mp, ref_map, renames):
+    """21.10: простые поля секции донора для обновления существующей
+    секции приёмника. Блочные значения [=[ ... ]=] не переносим:
+    вставка многострочного текста в одну строку ломает ini."""
+    fields = {}
+    in_block = False
+    for l in lines:
+        if in_block:
+            if ']=]' in l:
+                in_block = False
+            continue
+        m = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$', l)
+        if not m:
+            if l.rstrip().endswith('[=['):
+                in_block = True
+            continue
+        k, v = m.group(1), m.group(2).strip()
+        if '[=[' in l:
+            in_block = True
+            continue
+        fields[k] = v
+    if '_parent' in fields:
+        fields['_parent'] = mp.get(table + ':' + fields['_parent'], fields['_parent'])
+    keys = list(fields)
+    pseudo = ['%s = %s' % (k, fields[k]) for k in keys]
+    pseudo = replace_refs_in_body(pseudo, ref_map)
+    pseudo = replace_asset_paths(pseudo, renames)
+    for k, l in zip(keys, pseudo):
+        fields[k] = l.split('=', 1)[1].strip()
+    return fields
+
+
 def apply_std_fields(text, sid, fields):
     """20.10: вписать поля в существующую секцию [sid] (режим replace_std).
     Возвращает (новый текст, сколько полей применено)."""
@@ -147,6 +179,8 @@ def main():
 
     total = 0
     applied_std = 0
+    updated_secs = 0
+    updated_fields = 0
     errors = 0
     for t in cfg['tables']:
         sp = os.path.join(src, 'table', t + '.ini')
@@ -189,6 +223,35 @@ def main():
         elif not to_move:
             print('%s: нечего переносить' % t)
 
+        # 21.10 (аудит): повторный перенос. Существующие секции раньше
+        # просто пропускались, и правки донора не доезжали. Опция
+        # tables_update_existing переносит простые поля поверх приёмника,
+        # не трогая блочные [=[ ... ]=] и отсутствующие в доноре поля.
+        if cfg.get('tables_update_existing'):
+            upd_text = io.open(tp, 'rb').read().decode('utf-8', errors='replace')
+            n_sec = n_fld = 0
+            for old in order:
+                key = t + ':' + old
+                if key not in mp:
+                    continue
+                new = mp[key]
+                if new not in tsec_ids:
+                    continue
+                fields = prepare_fields(secs[old], t, mp, ref_map, renames)
+                if not fields:
+                    continue
+                upd_text, nf = apply_std_fields(upd_text, new, fields)
+                if nf:
+                    n_sec += 1
+                    n_fld += nf
+            if n_fld:
+                if not dry:
+                    io.open(tp, 'wb').write(upd_text.encode('utf-8'))
+                print('%s: обновлено существующих секций: %d, полей: %d%s'
+                      % (t, n_sec, n_fld, ' (dry-run)' if dry else ''))
+                updated_secs += n_sec
+                updated_fields += n_fld
+
         # 20.10: replace_std — поля поверх стандартных секций приёмника
         repl = {}
         for k, v in std_all.items():
@@ -199,7 +262,15 @@ def main():
             text = io.open(tp, 'rb').read().decode('utf-8', errors='replace')
             n_std = 0
             for sid, fields in sorted(repl.items()):
-                text, nf = apply_std_fields(text, sid, fields)
+                # 21.10: пути переименованных ассетов подставляем и в
+                # поля replace_std, иначе иконка/модель остаётся старой.
+                keys = list(fields)
+                vals = replace_asset_paths(
+                    ['%s = %s' % (k, fields[k]) for k in keys], renames)
+                f2 = {}
+                for k, l in zip(keys, vals):
+                    f2[k] = l.split('=', 1)[1].strip()
+                text, nf = apply_std_fields(text, sid, f2)
                 if nf:
                     n_std += nf
                 else:
@@ -217,6 +288,7 @@ def main():
             total += len(blocks)
 
     print('ИТОГО секций:', total, '| replace_std полей:', applied_std,
+          '| обновлено секций:', updated_secs, 'полей:', updated_fields,
           ('(dry-run)' if dry else ''))
     if errors:
         sys.exit(1)

@@ -45,12 +45,13 @@ def parse_bodies(path):
                 out[cur] = []
                 continue
             if cur:
+                # 21.10 (аудит): строку открытия блока сохраняем в теле,
+                # иначе терялось поле вида 'Description = [=['.
+                out[cur].append(l)
                 if l.rstrip().endswith('[=['):
-                    in_block = True
+                    in_block = ']=]' not in l
                 elif ']=]' in l:
                     in_block = False
-                else:
-                    out[cur].append(l)
         else:
             if ']=]' in l:
                 in_block = False

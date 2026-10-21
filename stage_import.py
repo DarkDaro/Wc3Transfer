@@ -9,7 +9,7 @@
 #    (модели со своими путями импорта); стандартные WC3 пути
 #    (Abilities/Units/...) — в mpq, не копируются
 # Dry-run: только отчёт.
-import io, os, sys, json, hashlib
+import io, os, sys, json, hashlib, shutil, time
 
 def md5(p):
     return hashlib.md5(io.open(p, 'rb').read()).hexdigest()
@@ -25,11 +25,31 @@ def main():
     deps_p = os.path.join(here, 'deps_result.json')
     if not os.path.exists(deps_p):
         print('deps_result.json нет — импорт по списку ассетов невозможен')
-        return
+        # 21.10: это не успешный no-op, иначе оркестратор запишет
+        # последним этапом import и откат возьмёт чужой список.
+        sys.exit(1)
     deps = json.load(io.open(deps_p, 'rb'))
+    # 21.10 (аудит): список созданных файлов — для отката import.
+    # Раньше откат восстанавливал только imp.ini, а скопированные
+    # ассеты оставались в приёмнике навсегда. Открываем ДО раннего
+    # выхода, чтобы пустой прогон тоже очищал прошлый список.
+    created_p = os.path.join(here, 'import_created.txt')
+    created_f = None
+    if not dry:
+        # 21.10: прошлый список не затираем молча — кладём копию в архив.
+        if os.path.exists(created_p) and os.path.getsize(created_p):
+            adir = os.path.join(here, cfg.get('safety', {}).get(
+                'backup_dir', 'transfer_backup'))
+            os.makedirs(adir, exist_ok=True)
+            shutil.copy2(created_p, os.path.join(
+                adir, 'import_created_%s_%d.txt' % (
+                    time.strftime('%Y%m%d-%H%M%S'), time.time_ns())))
+        created_f = io.open(created_p, 'w', encoding='utf-8', buffering=1)
     assets = deps.get('assets', [])
     if not assets:
         print('ассетов в deps нет')
+        if created_f is not None:
+            created_f.close()
         return
 
     excl = [e.lower().replace('\\', '/') for e in cfg['import'].get('exclude_paths', [])]
@@ -50,7 +70,26 @@ def main():
 
     copied = same = skipped = missing = renamed = 0
     renames = {}  # старый путь -> новый путь (v2)
-    for a in assets:
+    # 21.10: блок перенесён выше, до раннего выхода при пустых assets.
+    # Оставлен закомментированным по правилу «ничего не удалять».
+    # created_p = os.path.join(here, 'import_created.txt')
+    # created_f = None
+    # if not dry:
+    #     if os.path.exists(created_p) and os.path.getsize(created_p):
+    #         adir = os.path.join(here, 'transfer_backup')
+    #         os.makedirs(adir, exist_ok=True)
+    #         shutil.copy2(created_p, os.path.join(
+    #             adir, 'import_created_%s.txt' % time.strftime('%Y%m%d-%H%M%S')))
+    #     created_f = io.open(created_p, 'w', encoding='utf-8', buffering=1)
+
+    def note_created(p):
+        if created_f is not None:
+            created_f.write(os.path.relpath(p, tgt).replace(os.sep, '/') + chr(10))
+
+    total_assets = len(assets)
+    for idx, a in enumerate(assets, 1):
+        if idx % 200 == 0:
+            print('  импорт: %d/%d' % (idx, total_assets))
         al = a.lower().replace('\\', '/')
         if is_excluded(al):
             skipped += 1
@@ -93,6 +132,7 @@ def main():
             else:
                 os.makedirs(os.path.dirname(dst2), exist_ok=True)
                 io.open(dst2, 'wb').write(io.open(found, 'rb').read())
+                note_created(dst2)
             # путь в приёмнике: resource/<отн. путь>
             old_rel = a
             new_rel = os.path.relpath(dst2, imp_root)
@@ -105,7 +145,11 @@ def main():
         else:
             os.makedirs(os.path.dirname(dst), exist_ok=True)
             io.open(dst, 'wb').write(io.open(found, 'rb').read())
+            note_created(dst)
         copied += 1
+
+    if created_f is not None:
+        created_f.close()
 
     print('ассетов: %d | копий: %d | идентичных (пропуск): %d | переименовано v2+: %d | исключения: %d | стандартных WC3: %d%s'
           % (len(assets), copied, same, renamed, skipped, missing, ' (dry-run)' if dry else ''))

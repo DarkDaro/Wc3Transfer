@@ -65,6 +65,11 @@ def save_state(cfg, st):
         json.dumps(st, indent=2, ensure_ascii=False).encode('utf-8'))
 
 def log(cfg, msg):
+    # 21.10: машинные маркеры прогресса идут в stdout без метки времени
+    # и не засоряют журнал. GUI читает их как есть.
+    if msg.startswith('@@'):
+        print(msg)
+        return
     d = cfg.get('log_dir') or os.path.join(cfg_dir(), 'logs')
     if d and os.path.isdir(d) is False:
         os.makedirs(d, exist_ok=True)
@@ -85,10 +90,14 @@ def fhash(p):
 def snapshot(cfg, stage, files):
     """Бэкап файлов перед этапом."""
     bdir = os.path.join(cfg_dir(), cfg['safety']['backup_dir'], stage)
-    # 20.10: прошлый бэкап этого этапа удаляем — иначе после двух
-    # прогонов в папке смешаны поколения и откат возвращает гибрид.
+    # 21.10: прошлый бэкап этапа не удаляем, а переносим в архив
+    # (правило «ничего не удалять»); откат всегда берёт свежий bdir.
     if os.path.isdir(bdir):
-        shutil.rmtree(bdir)
+        adir = os.path.join(cfg_dir(), cfg['safety']['backup_dir'], '_old',
+                            '%s_%d' % (stage, time.time_ns()))
+        os.makedirs(adir, exist_ok=True)
+        shutil.move(bdir, adir)
+        log(cfg, 'прошлый бэкап %s перенесён в архив: %s' % (stage, adir))
     os.makedirs(bdir, exist_ok=True)
     n = 0
     for p in files:
@@ -108,7 +117,9 @@ def target_files(cfg, stage):
     if stage == 'tables':
         return [os.path.join(tb, n + '.ini') for n in cfg['tables']]
     if stage == 'import':
-        return []
+        # 21.10 (аудит): импорт меняет реестр table/imp.ini — его
+        # откатываем вместе с созданными ассетами (import_created.txt).
+        return [os.path.join(tb, 'imp.ini')]
     if stage == 'code':
         out = []
         for root, dirs, files in os.walk(os.path.join(t, 'trigger')):
@@ -137,6 +148,7 @@ def run_stage(cfg, stage, dry):
         'testspawn': 'stage_testspawn.py',
         'verify': 'stage_verify.py',
     }
+    log(cfg, '@@STAGE %s' % stage)
     sp = os.path.join(HERE, scripts[stage])
     if not os.path.exists(sp):
         log(cfg, 'ЭТАП %s: скрипт %s ещё не создан — пропуск' % (stage, scripts[stage]))
@@ -144,6 +156,9 @@ def run_stage(cfg, stage, dry):
     log(cfg, 'ЭТАП %s: запуск %s%s' % (stage, scripts[stage], ' (DRY-RUN)' if dry else ''))
     import subprocess
     args = [sys.executable, sp, CFG_PATH] + (['--dry-run'] if dry else [])
+    # 21.10: --remap пересобирает маппинг с нуля (старый уходит в архив)
+    if stage == 'mapping' and '--remap' in sys.argv:
+        args.append('--fresh')
     # 18.09: --allow-b для этапа code (замена B-литералов-баффов)
     if stage == 'code' and (cfg.get('code', {}).get('allow_b') or '--allow-b' in sys.argv):
         args.append('--allow-b')
@@ -237,8 +252,40 @@ def main():
                 os.makedirs(os.path.dirname(dst), exist_ok=True)
                 shutil.copy2(src, dst)
                 n += 1
+        # 21.10 (аудит): откат import убирает и созданные им файлы.
+        # Ничего не удаляем: переносим их в архив отката, откуда можно
+        # вернуть. Список пишет stage_import, бэкап import содержит imp.ini.
+        moved = 0
+        arch = os.path.join(cfg_dir(), cfg['safety']['backup_dir'],
+                            'rollback_import_%s_%d' % (
+                                time.strftime('%Y%m%d-%H%M%S'), time.time_ns()))
+        created_p = os.path.join(cfg_dir(), 'import_created.txt')
+        if last == 'import' and os.path.exists(created_p):
+            tgt_abs = os.path.abspath(cfg['target']) + os.sep
+            for line in io.open(created_p, encoding='utf-8'):
+                rel = line.strip().replace('/', os.sep)
+                if not rel:
+                    continue
+                p = os.path.abspath(os.path.join(cfg['target'], rel))
+                bp = os.path.abspath(os.path.join(bdir, rel))
+                if not p.startswith(tgt_abs):
+                    print('ОТКАТ: пропуск пути вне приёмника:', rel)
+                    continue
+                if os.path.isfile(p) and not os.path.isfile(bp):
+                    dst = os.path.join(arch, rel)
+                    try:
+                        os.makedirs(os.path.dirname(dst), exist_ok=True)
+                        shutil.move(p, dst)
+                        moved += 1
+                    except OSError as e:
+                        print('ОТКАТ: не удалось перенести в архив %s: %s' % (p, e))
         print('Откат после этапа', last, ': восстановлено', n, 'файлов')
-        print('Файлы, созданные этапом заново, откат не удаляет.')
+        if last == 'import':
+            print('Созданные импортом файлы перенесены в архив:', moved)
+            if moved:
+                print('Архив отката:', arch)
+        else:
+            print('Файлы, созданные этапом заново, откат не удаляет.')
         st['completed'] = st['completed'][:st['completed'].index(last)] if last in st.get('completed', []) else st.get('completed', [])
         st['last_ok_stage'] = None
         save_state(cfg, st)
@@ -262,7 +309,7 @@ def main():
     if args.remap:
         log(cfg, '=== ПЕРЕМАППИНГ (реестр + маппинг под текущей пару карт) ===')
         # 20.09: прогресс-бар GUI — общее число этапов
-        log(cfg, '=== ЭТАПЫ: 2')
+        log(cfg, '@@PROGRESS 2')
         for s in ('registry', 'mapping'):
             r = run_stage(cfg, s, False)
             if r == 'fail':
@@ -289,7 +336,7 @@ def main():
                 # 20.09: прогресс-бар GUI — этапы этой итерации
                 # (+registry: реестр должен видеть секции, записанные
                 # прошлой итерацией, иначе mapping не знает занятых ID)
-                log(cfg, '=== ЭТАПЫ: %d' % (len(core) + 1))
+                log(cfg, '@@PROGRESS %d' % (len(core) + (1 if it > 1 else 0)))
                 if it > 1:
                     r0 = run_stage(cfg, 'registry', args.dry_run)
                     if r0 == 'fail':
@@ -322,7 +369,7 @@ def main():
         # 20.10: --stage вместе с --dry-run больше не запускает ВСЕ этапы
         todo = [args.stage] if args.stage else stages
         # 20.09: прогресс-бар GUI — общее число этапов прогона
-        log(cfg, '=== ЭТАПЫ: %d' % len(todo))
+        log(cfg, '@@PROGRESS %d' % len(todo))
         if args.dry_run:
             print('=== DRY-RUN (запись отключена) ===')
         for s in todo:

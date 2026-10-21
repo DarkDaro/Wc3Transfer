@@ -65,12 +65,23 @@ def main():
     tgt = cfg['target']
 
     mp = json.load(io.open(os.path.join(here, cfg['mapping']['pkl'].replace('.pkl', '.json')), 'rb'))
-    # литералы: old != new
+    # литералы: old != new. 21.10: один и тот же равкод в разных типах
+    # может получить разные ID — такую замену не угадываем, пропускаем.
     lit = {}
+    amb = {}
     for k, new in mp.items():
         t, old = k.split(':', 1)
         if old != new:
+            if old in lit and lit[old][0] != new:
+                amb.setdefault(old, set()).update((lit[old][0], new))
+                continue
             lit[old] = (new, t)
+    for old in amb:
+        lit.pop(old, None)
+    if amb:
+        print('ВНИМАНИЕ: равкод в разных типах получил разные ID — замена пропущена:')
+        for old in sorted(amb):
+            print('  %s -> %s' % (old, ', '.join(sorted(amb[old]))))
 
     # какие .j файлы источника содержат литералы
     # код: code-split/*.j (сплит) + trigger/*.j
@@ -559,7 +570,7 @@ def main():
     # Пишем ТОЛЬКО свою секцию: разделитель deploy_to + наши файлы.
     # Секция идемпотентна: при повторе прогона заменяется целиком,
     # дубли имён невозможны по построению.
-    if n and cfg['code'].get('update_catalog', True):
+    if (n or n_gui) and cfg['code'].get('update_catalog', True):
         cat_p = os.path.join(tgt, 'trigger', 'catalog.lml')
         if os.path.exists(cat_p):
             cat = io.open(cat_p, 'rb').read().decode('utf-8', errors='replace')

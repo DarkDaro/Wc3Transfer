@@ -44,6 +44,9 @@ DEFAULT_CFG = {
     'name': '',
     'tables': ['unit', 'ability', 'buff', 'item', 'upgrade'],
     'skip_tables': ['w3i', 'misc'],
+    # 21.10: повторный перенос может обновлять поля уже существующих
+    # объектов приёмника (по умолчанию выключено — не затираем правки).
+    'tables_update_existing': False,
     'import': {
         'enabled': True,
         'copy_dirs': ['resource', 'sound'],
@@ -146,10 +149,35 @@ class Tooltip:
         self.text = text
         self.wraplength = wraplength
         self.tip = None
-        widget.bind("<Enter>", self._show)
-        widget.bind("<Leave>", self._hide)
+        self._hide_job = None
+        # 21.10 (аудит): у CTkFrame события Enter забирают дочерние
+        # виджеты. Привязываем подсказку ко всему поддереву.
+        self._bind_tree(widget)
+        try:
+            widget.after_idle(lambda: self._bind_tree(widget))
+        except Exception:
+            pass
+
+    def _bind_tree(self, w):
+        try:
+            w.bind("<Enter>", self._show, add="+")
+            w.bind("<Leave>", self._leave, add="+")
+        except Exception:
+            pass
+        try:
+            kids = w.winfo_children()
+        except Exception:
+            kids = []
+        for c in kids:
+            self._bind_tree(c)
 
     def _show(self, _e=None):
+        if self._hide_job:
+            try:
+                self.widget.after_cancel(self._hide_job)
+            except Exception:
+                pass
+            self._hide_job = None
         if self.tip:
             return
         mode = ctk.get_appearance_mode()
@@ -166,7 +194,21 @@ class Tooltip:
                 font=("Segoe UI", 9)).pack()
         self.tip.wm_deiconify()
 
+    def _leave(self, _e=None):
+        # 21.10: при переходе между детьми рамки не прячем сразу —
+        # даём 120 мс, иначе подсказка мигает.
+        if self._hide_job:
+            try:
+                self.widget.after_cancel(self._hide_job)
+            except Exception:
+                pass
+        try:
+            self._hide_job = self.widget.after(120, self._hide)
+        except Exception:
+            pass
+
     def _hide(self, _e=None):
+        self._hide_job = None
         if self.tip:
             self.tip.destroy()
             self.tip = None
@@ -210,13 +252,14 @@ class App(ctk.CTk):
         super().__init__()
         self.title('Утилита переноса объектов между картами (w3x2lni) — v6 CTk')
         # 20.09: контенту нужно ~1130px высоты — окно 860 давило журнал
-        # и ленту прогресса. Поднимаем до 1200x1150.
-        self.geometry('1200x1150')
-        # 20.09: сохранённая геометрия из конфига не должна выдавливать
-        # статусбар/кнопки за край — минимум 1180x1130
-        # 20.10 (аудит): 1264 — при системном DPI-масштабе 125% ряд 2
-        # кнопок и последние чипы прогресса не обрезаются
-        self.minsize(1264, 1130)
+        # и ленту прогресса. 21.10 (аудит): на 1920x1080 окно 1264x1130
+        # уходило нижним краем за экран — статусбар был не виден.
+        # Считаем размер от фактического экрана.
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        w0 = min(1264, sw - 40)
+        h0 = min(1130, sh - 90)
+        self.geometry('%dx%d' % (w0, h0))
+        self.minsize(min(1180, w0), min(900, h0))
         self.cfg = {}
         self.stage_vars = {}
         self.q = queue.Queue()
@@ -240,6 +283,7 @@ class App(ctk.CTk):
         if self.cfg.get('ui', {}).get('mode') == 'service':
             self.mode_seg.set('Обслуживание')
             self.after(300, self._apply_mode)
+        self.protocol('WM_DELETE_WINDOW', self._on_close)
         self.after(100, self._poll_log)
 
     # ---------- построение UI ----------
@@ -266,16 +310,69 @@ class App(ctk.CTk):
             text_color=WARN if serv else None)
 
     def _stop_run(self):
-        # 20.10 (аудит): остановка висящего прогона (терминейт ребёнка).
+        # 20.10 (аудит): остановка висящего прогона.
+        # terminate() убивал только оркестратор, дочерний stage_*.py
+        # продолжал писать в приёмник. На Windows валим дерево целиком.
         p = getattr(self, '_proc', None)
         if p and p.poll() is None:
             try:
-                p.terminate()
-                self._log('ОСТАНОВКА по кнопке «Стоп»', 'warn')
+                if os.name == 'nt':
+                    subprocess.run(['taskkill', '/F', '/T', '/PID', str(p.pid)],
+                                   capture_output=True,
+                                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                else:
+                    p.terminate()
+                self._log('ОСТАНОВКА по кнопке «Стоп» (включая дочерние этапы)', 'warn')
             except Exception as e:
                 self._log('Стоп: не удалось прервать: %s' % e, 'err')
         else:
             self._log('Стоп: активного прогона нет', 'warn')
+
+    def _on_close(self):
+        # 20.10 (аудит): закрытие окна во время прогона оставляло
+        # оркестратор сиротой — он продолжал писать в приёмник.
+        p = getattr(self, '_proc', None)
+        if p and p.poll() is None:
+            if not messagebox.askyesno(
+                    'Идёт прогон',
+                    'Прогон ещё выполняется.\nОстановить его и закрыть окно?'):
+                return
+            try:
+                if os.name == 'nt':
+                    subprocess.run(['taskkill', '/F', '/T', '/PID', str(p.pid)],
+                                   capture_output=True,
+                                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                else:
+                    p.terminate()
+            except Exception:
+                pass
+        self.destroy()
+
+    def _cfg_dir(self):
+        return os.path.dirname(os.path.abspath(self._cfg_path()))
+
+    def _bg(self, work, done=None):
+        """20.10: фоновая задача без заморозки UI. work() -> результат,
+        done(результат) выполняется в главном потоке."""
+        def run():
+            try:
+                res = work()
+            except Exception as e:
+                self._log('ОШИБКА в фоновой задаче: %s' % e, 'err')
+                return
+            if done is not None:
+                try:
+                    self.after(0, lambda: done(res))
+                except Exception:
+                    pass
+        threading.Thread(target=run, daemon=True).start()
+
+    def _safe_after(self, win, fn):
+        """after() из рабочего потока: окно могло быть закрыто."""
+        try:
+            win.after(0, fn)
+        except Exception:
+            pass
 
     def _apply_mode(self):
         """19.09 (v7): режим Перенос/Обслуживание.
@@ -462,6 +559,17 @@ class App(ctk.CTk):
         self.e_skip = ctk.CTkEntry(ci2, font=FONT_MONO, height=28)
         self.e_skip.pack(fill="x", pady=(0, 6))
         Tooltip(self.e_skip, "w3i — настройки карты (слоты, игроки), misc — константы.\nЭти таблицы НЕ переносят (ломают карту).")
+        # 21.10 (аудит): повторный перенос по умолчанию не трогает уже
+        # существующие секции. Галочка включает синхронизацию полей.
+        self.v_tupd = tk.BooleanVar(value=False)
+        cb_upd = ctk.CTkCheckBox(
+            ci2, text="Обновлять существующие объекты (поля донора поверх приёмника)",
+            variable=self.v_tupd, font=FONT_SMALL,
+            checkbox_width=18, checkbox_height=18)
+        cb_upd.pack(anchor="w", pady=(0, 2))
+        Tooltip(cb_upd, "По умолчанию ID, уже существующие в приёмнике, пропускаются.\n"
+                        "С галочкой простые поля донора перезаписывают их значения.\n"
+                        "Блочные описания [=[ ... ]=] и поля, которых нет у донора, не трогаются.")
 
         # 5. Импорт ассетов
         imf, imi = self._card(right, "5. Импорт ассетов")
@@ -938,22 +1046,24 @@ class App(ctk.CTk):
                         continue
                 except Exception:
                     pass
-            # 20.09: прогресс-бар — парсинг строк этапов
-            # '=== ЭТАПЫ: N' — общее число; 'ЭТАП X: запуск' — старт очередного
-            try:
-                if msg.startswith('=== ЭТАПЫ:'):
-                    self._pb_total = int(msg.split(':')[1].strip())
-                    self._pb_done = 0
-                    self.pbar.set(0)
-                    self.pct_lbl.configure(text='0%')
-                elif 'ЭТАП ' in msg and ': запуск' in msg:
-                    if getattr(self, '_pb_total', 0):
-                        self._pb_done += 1
-                        frac = min(self._pb_done, self._pb_total) / self._pb_total
-                        self.pbar.set(frac)
-                        self.pct_lbl.configure(text='%d%%' % round(frac * 100))
-            except Exception:
-                pass
+            # 21.10 (аудит): машинные маркеры прогресса. Раньше парсились
+            # русские строки — любая правка формулировки ломала полоску.
+            if msg.startswith('@@'):
+                try:
+                    if msg.startswith('@@PROGRESS '):
+                        self._pb_total = int(msg.split()[1])
+                        self._pb_done = 0
+                        self.pbar.set(0)
+                        self.pct_lbl.configure(text='0%')
+                    elif msg.startswith('@@STAGE '):
+                        if getattr(self, '_pb_total', 0):
+                            self._pb_done += 1
+                            frac = min(self._pb_done, self._pb_total) / self._pb_total
+                            self.pbar.set(frac)
+                            self.pct_lbl.configure(text='%d%%' % round(frac * 100))
+                except Exception:
+                    pass
+                continue
             self.log.insert('end', msg + '\n', tag or ())
             self.log.see('end')
         self.after(100, self._poll_log)
@@ -969,6 +1079,11 @@ class App(ctk.CTk):
         cfg['name'] = self.e_name.get().strip()
         cfg['tables'] = [t.strip() for t in self.e_tables.get().split(',') if t.strip()]
         cfg['skip_tables'] = [t.strip() for t in self.e_skip.get().split(',') if t.strip()]
+        # 21.10: галочка обновления существующих секций
+        cfg['tables_update_existing'] = bool(self.v_tupd.get())
+        # 21.10: секции import/code больше не расходятся с галочками этапов
+        cfg['import']['enabled'] = bool(self.stage_vars['import'].get())
+        cfg['code']['enabled'] = bool(self.stage_vars['code'].get())
         cfg.setdefault('deps', {})['roots'] = [t.strip() for t in self.e_roots.get().split(',') if t.strip()]
         cfg.setdefault('mapping', {})['mode'] = self.mode_var.get()
         cfg['geometry']['enabled'] = self.v_geom.get()
@@ -1038,6 +1153,7 @@ class App(ctk.CTk):
         self.e_name.delete(0, 'end'); self.e_name.insert(0, self.cfg.get('name', ''))
         self.e_tables.delete(0, 'end'); self.e_tables.insert(0, ', '.join(self.cfg.get('tables', [])))
         self.e_skip.delete(0, 'end'); self.e_skip.insert(0, ', '.join(self.cfg.get('skip_tables', [])))
+        self.v_tupd.set(bool(self.cfg.get('tables_update_existing', False)))
         self.e_roots.delete(0, 'end'); self.e_roots.insert(0, ', '.join(self.cfg.get('deps', {}).get('roots', [])))
         self.mode_var.set(self.cfg.get('mapping', {}).get('mode', 'smart'))
         self.v_geom.set(self.cfg.get('geometry', {}).get('enabled', False))
@@ -1099,9 +1215,15 @@ class App(ctk.CTk):
                         sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
                         x = max(-40, min(x, sw - 320))
                         y = max(-40, min(y, sh - 320))
-                        self.geometry('%dx%d+%d+%d' % (int(m.group(1)), int(m.group(2)), x, y))
+                        w2 = min(int(m.group(1)), sw - 40)
+                        h2 = min(int(m.group(2)), sh - 90)
+                        self.minsize(min(1180, w2), min(900, h2))
+                        self.geometry('%dx%d+%d+%d' % (w2, h2, x, y))
                     else:
-                        self.geometry(geo)
+                        w2 = min(int(m.group(1)), self.winfo_screenwidth() - 40)
+                        h2 = min(int(m.group(2)), self.winfo_screenheight() - 90)
+                        self.minsize(min(1180, w2), min(900, h2))
+                        self.geometry('%dx%d' % (w2, h2))
             except Exception:
                 pass
         # 20.10 (аудит): выбор этапов восстанавливается из конфига —
@@ -1125,7 +1247,9 @@ class App(ctk.CTk):
 
     def _run_loop(self):
         self._save_cfg()
-        self._run(['--loop'])
+        # 20.10 (аудит): «Полный цикл» больше не игнорирует Dry-run
+        args = ['--loop'] + (['--dry-run'] if self.v_dry.get() else [])
+        self._run(args)
 
     def _verify_only(self):
         if self.running:
@@ -1147,8 +1271,14 @@ class App(ctk.CTk):
     def _manifest(self):
         self._save_cfg()
         cmd = [sys.executable, os.path.join(HERE, 'make_manifest.py'), CFG]
-        r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', cwd=HERE)
-        self._log(((r.stdout or '') + (r.stderr or '')).strip())
+
+        def work():
+            flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8',
+                               errors='replace', cwd=HERE, creationflags=flags)
+            return ((r.stdout or '') + (r.stderr or '')).strip()
+
+        self._bg(work, lambda txt: self._log(txt))
 
     def _worker(self, cmd, scope=None):
         try:
@@ -1409,7 +1539,7 @@ class App(ctk.CTk):
         cb_prot = ctk.CTkCheckBox(btns2, text='Защитный список', variable=v_prot,
                                   font=FONT_SMALL, height=28)
         cb_prot.pack(side='left', padx=(10, 3), pady=2)
-        Tooltip(cb_prot, 'НЕ помечать неиспользуемыми объекты из внешнего списка\\ncleanup_protect.json (рядом с конфигом): {тип: [равкоды]}\\nЖивые дамми-абилки и их баффы, которые сканер может спутать с мусором.\\nФормат: {\"buff\": ["B00C", "B023"], "ability": ["A066"]}')
+        Tooltip(cb_prot, 'НЕ помечать неиспользуемыми объекты из внешнего списка\ncleanup_protect.json (рядом с конфигом): {тип: [равкоды]}\nЖивые дамми-абилки и их баффы, которые сканер может спутать с мусором.\nФормат: {\"buff\": ["B00C", "B023"], "ability": ["A066"]}')
         self._cleanup_v_prot = v_prot
         self._fit_toplevel(win, min_w=980, min_h=700)
         return win
@@ -1443,7 +1573,7 @@ class App(ctk.CTk):
                 'dead_funcs': v_func.get(), 'cascade': v_casc.get(),
                 'include_codej': v_codej.get(), 'comments': v_com.get(),
                 'exclude_dirs': excl}
-        opath = os.path.join(HERE, 'triggers_opts.json')
+        opath = os.path.join(self._cfg_dir(), 'triggers_opts.json')
         io.open(opath, 'wb').write(json.dumps(opts).encode('utf-8'))
         lbl.configure(text='скан идёт (1-3 мин)...')
         self._log('>>> Чистка триггеров: скан %s' % tgt)
@@ -1451,19 +1581,29 @@ class App(ctk.CTk):
         tree.delete(*tree.get_children())
         def work():
             try:
+                # 20.10: --dir — чистим именно ту карту, что в поле окна
                 r = subprocess.run([sys.executable, '-u', os.path.join(HERE, 'stage_triggers.py'),
-                                    CFG, '--scan', opath],
+                                    CFG, '--dir', tgt, '--scan', opath],
                                    capture_output=True, text=True, encoding='utf-8',
-                                   errors='replace', cwd=HERE, timeout=600)
-                win.after(0, lambda: self._trigclean_show(r.returncode, (r.stdout or '') + (r.stderr or ''), tgt, opts))
+                                   errors='replace', cwd=HERE, timeout=600,
+                                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
+                self._safe_after(win, lambda: self._trigclean_show(
+                    r.returncode, (r.stdout or '') + (r.stderr or ''), tgt, opts))
             except Exception as e:
-                win.after(0, lambda: self._trigclean_show(1, str(e), tgt, opts))
-        import threading
+                self._safe_after(win, lambda: self._trigclean_show(1, str(e), tgt, opts))
         threading.Thread(target=work, daemon=True).start()
 
     def _trigclean_show(self, code, out, tgt, opts):
-        lbl = self._trigclean_state['lbl']
-        tree = self._trigclean_state['tree']
+        st = getattr(self, '_trigclean_state', None)
+        if not st:
+            return
+        lbl = st.get('lbl')
+        tree = st.get('tree')
+        try:
+            if lbl is None or tree is None or not tree.winfo_exists():
+                return
+        except Exception:
+            return
         for l in out.splitlines():
             if l.strip():
                 self._log('  ' + l[:160])
@@ -1472,7 +1612,7 @@ class App(ctk.CTk):
             self._log('>>> Скан триггеров: ОШИБКА', 'err')
             return
         try:
-            res = json.load(io.open(os.path.join(HERE, 'triggers_scan.json'), 'rb'))
+            res = json.load(io.open(os.path.join(self._cfg_dir(), 'triggers_scan.json'), 'rb'))
         except Exception as e:
             lbl.configure(text='нет результатов')
             self._log('>>> Скан триггеров: не прочитан результат: %s' % e, 'err')
@@ -1519,13 +1659,16 @@ class App(ctk.CTk):
         if not sel:
             messagebox.showwarning('Выбор', 'Выдели строки для удаления.')
             return
+        # 20.10: удаляем в той карте, по которой сделан скан
+        tgt = st.get('dir') or e_dir.get().strip()
         # 19.09 (вечер): ДЕМО — без подтверждения и записи
         if dry:
             pass
-        elif not messagebox.askyesno('Подтверждение', 'Удалить %d записей?\nПеред удалением будет бэкап (включая catalog.lml и variable.lml).' % len(sel)):
+        elif not messagebox.askyesno('Подтверждение', 'Удалить %d записей?\nКарта: %s\nПеред удалением будет бэкап (включая catalog.lml и variable.lml).' % (len(sel), tgt)):
             return
         # собираю delete-JSON по категориям
-        d = {'empty_dirs': [], 'empty_txt': [], 'disabled': [], 'globals': [], 'dead_funcs': {}}
+        d = {'empty_dirs': [], 'empty_txt': [], 'disabled': [], 'globals': [], 'dead_funcs': {},
+             'del_notes': bool(self.cfg.get('trigclean', {}).get('del_notes', False))}
         scan = st['scan']
         for item in sel:
             vals = tree.item(item, 'values')
@@ -1547,19 +1690,20 @@ class App(ctk.CTk):
             elif why.startswith('мёртвая функция'):
                 if name in scan.get('dead_funcs', {}):
                     d['dead_funcs'][name] = scan['dead_funcs'][name]
-        jp = os.path.join(HERE, 'triggers_delete.json')
+        jp = os.path.join(self._cfg_dir(), 'triggers_delete.json')
         io.open(jp, 'wb').write(json.dumps(d, ensure_ascii=False, indent=1).encode('utf-8'))
         lbl.configure(text='демо...' if dry else 'удаление...')
         def work():
             try:
                 cmd = [sys.executable, '-u', os.path.join(HERE, 'stage_triggers.py'),
-                       CFG, '--delete', jp]
+                       CFG, '--dir', tgt, '--delete', jp]
                 # 19.09 (вечер): ДЕМО — флаг --dry, без записи
                 if dry:
                     cmd.append('--dry')
                 r = subprocess.run(cmd,
                                    capture_output=True, text=True, encoding='utf-8',
-                                   errors='replace', cwd=HERE, timeout=600)
+                                   errors='replace', cwd=HERE, timeout=600,
+                                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
                 win = st['win']
                 out = (r.stdout or '') + (r.stderr or '')
                 if dry:
@@ -1571,16 +1715,19 @@ class App(ctk.CTk):
                             except Exception:
                                 pass
                             break
-                    win.after(0, lambda: self._trigclean_deleted(r.returncode, out, len(sel), lbl, tree, [], dry=True))
+                    self._safe_after(win, lambda: self._trigclean_deleted(r.returncode, out, len(sel), lbl, tree, [], dry=True))
                 else:
-                    win.after(0, lambda: self._trigclean_deleted(r.returncode, out, len(sel), lbl, tree, sel, dry=dry))
+                    self._safe_after(win, lambda: self._trigclean_deleted(r.returncode, out, len(sel), lbl, tree, sel, dry=dry))
             except Exception as e:
-                win = st['win']
-                win.after(0, lambda: self._trigclean_deleted(1, str(e), 0, lbl, tree, sel))
-        import threading
+                self._safe_after(st['win'], lambda: self._trigclean_deleted(1, str(e), 0, lbl, tree, sel))
         threading.Thread(target=work, daemon=True).start()
 
     def _trigclean_deleted(self, code, out, n, lbl, tree, sel, dry=False):
+        try:
+            if tree is None or not tree.winfo_exists():
+                return
+        except Exception:
+            return
         for l in out.splitlines():
             if l.strip():
                 self._log('  ' + l[:160])
@@ -1861,23 +2008,39 @@ class App(ctk.CTk):
         protect = {}
         if self._cleanup_v_prot.get():
             self.cfg.setdefault('cleanup', {})['protect'] = True
-            pp = os.path.join(os.path.dirname(self._cfg_path()), 'cleanup_protect.json')
+            pp = os.path.join(self._cfg_dir(), 'cleanup_protect.json')
             if os.path.exists(pp):
                 protect = json.load(io.open(pp, 'rb'))
         else:
             self.cfg.setdefault('cleanup', {})['protect'] = False
         self._save_cfg()
-        res = sc.scan(tgt, patterns, manual, protect)
-        self._cleanup_state = {'scan': res, 'dir': tgt, 'casc': v_casc.get(),
-                               'filters': {'unused': v_unused.get(), 'bad': v_bad.get(), 'suf': v_suf.get()},
-                               'tree': self._cleanup_state['tree'], 'win': self._cleanup_state['win']}
-        tree = self._cleanup_state['tree']
+        # 20.10 (аудит): скан большой карты больше не морозит окно.
+        # Значения Tk-переменных снимаем в главном потоке.
+        show_suf = bool(v_suf.get())
+        show_bad = bool(v_bad.get())
+        show_unused = bool(v_unused.get())
+        casc = bool(v_casc.get())
+        allowed = {tid for tid, v in getattr(self, '_type_vars', {}).items() if v.get()} or set(sc.TYPES)
+        self._cleanup_lbl.configure(text='скан...')
+        self._log('>>> Чистка: скан %s ...' % tgt)
+
+        def work():
+            return sc.scan(tgt, patterns, manual, protect, cfgp=self._cfg_path())
+
+        def done(res):
+            self._cleanup_render(res, tgt, casc, allowed, show_unused, show_bad, show_suf)
+
+        self._bg(work, done)
+
+    def _cleanup_render(self, res, tgt, casc, allowed, show_unused, show_bad, show_suf):
+        st = getattr(self, '_cleanup_state', None)
+        if not st or not st.get('tree'):
+            return
+        tree = st['tree']
+        self._cleanup_state = {'scan': res, 'dir': tgt, 'casc': casc,
+                               'tree': tree, 'win': st.get('win')}
         tree.delete(*tree.get_children())
         self._cleanup_all_iids = None
-        allowed = {tid for tid, v in getattr(self, '_type_vars', {}).items() if v.get()} or set(sc.TYPES)
-        show_suf = v_suf.get()
-        show_bad = v_bad.get()
-        show_unused = v_unused.get()
         n = 0
         for t, d in res['suffix'].items():
             if t not in allowed or not show_suf:
@@ -1928,28 +2091,38 @@ class App(ctk.CTk):
         for item in sel:
             sid, t = tree.item(item, 'values')[0], tree.item(item, 'values')[1]
             del_list.setdefault(t, []).append(sid)
-        lines = sc.delete(st['dir'], del_list,
-                          os.path.join(HERE, 'logs'),
-                          os.path.join(HERE, 'transfer_backup', 'cleanup'),
-                          dry=dry)
-        for l in lines:
-            self._log('  ' + l)
-        # 19.09 (вечер): ДЕМО — открыть лог, ничего не удалять из списка
-        if dry:
+        tgt = st['dir']
+        log_dir = os.path.join(self._cfg_dir(), 'logs')
+        bdir = os.path.join(self._cfg_dir(), 'transfer_backup', 'cleanup')
+        self._log('>>> Чистка: %s %d объектов ...' % ('демо' if dry else 'удаление', len(sel)))
+
+        def work():
+            return sc.delete(tgt, del_list, log_dir, bdir, dry=dry)
+
+        def done(lines):
             for l in lines:
-                if l.startswith('ЛОГ: '):
-                    try:
-                        os.startfile(l[5:].strip())
-                    except Exception:
-                        pass
-                    break
-            self._log('>>> ДЕМО завершено: ничего не записано, лог открыт', 'ok')
-            self._cleanup_lbl.configure(text='демо: %d будет удалено' % len(sel))
-            return
-        self._log('>>> Чистка завершена, лог в logs/', 'ok')
-        for item in sel:
-            tree.delete(item)
-        self._cleanup_lbl.configure(text='удалено: %d' % len(sel))
+                self._log('  ' + l)
+            # 19.09 (вечер): ДЕМО — открыть лог, ничего не удалять из списка
+            if dry:
+                for l in lines:
+                    if l.startswith('ЛОГ: '):
+                        try:
+                            os.startfile(l[5:].strip())
+                        except Exception:
+                            pass
+                        break
+                self._log('>>> ДЕМО завершено: ничего не записано, лог открыт', 'ok')
+                self._cleanup_lbl.configure(text='демо: %d будет удалено' % len(sel))
+                return
+            self._log('>>> Чистка завершена, лог в logs/', 'ok')
+            for item in sel:
+                try:
+                    tree.delete(item)
+                except Exception:
+                    pass
+            self._cleanup_lbl.configure(text='удалено: %d' % len(sel))
+
+        self._bg(work, done)
 
     def _repair_tables(self, e_dir):
         tgt = e_dir.get().strip()
@@ -1961,20 +2134,32 @@ class App(ctk.CTk):
         self._repair_tgt = tgt
         if not first and not messagebox.askyesno('Починка', 'Применить правки к таблицам?\nПеред записью будет бэкап.'):
             return
-        lines, total = sr.repair(tgt, None, os.path.join(HERE, 'transfer_backup', 'repair'), do=not first)
-        for l in lines:
-            self._log('  ' + l)
-        if total:
-            if first:
-                self._repair_ran = True
-                self._log('>>> Починка: скан — найдено %d проблем. Запусти ещё раз для применения (бэкап + лог).' % total, 'warn')
+        # 20.10 (аудит): починка большого набора таблиц в фоне (UI не морозим)
+        self._log('>>> Починка: %s ...' % ('скан' if first else 'применение'))
+        cfgp = self._cfg_path()
+        bdir = os.path.join(self._cfg_dir(), 'transfer_backup', 'repair')
+
+        def work():
+            return sr.repair(tgt, None, bdir, do=not first, cfgp=cfgp)
+
+        def done(res):
+            lines, total = res
+            for l in lines:
+                self._log('  ' + l)
+            if total:
+                if first:
+                    self._repair_ran = True
+                    self._log('>>> Починка: скан — найдено %d проблем. Запусти ещё раз для применения (бэкап + лог).' % total, 'warn')
+                else:
+                    ldir = os.path.join(self._cfg_dir(), 'logs')
+                    os.makedirs(ldir, exist_ok=True)
+                    lp = os.path.join(ldir, 'repair-%s.md' % time.strftime('%Y-%m-%d'))
+                    io.open(lp, 'ab').write((chr(10).join(lines) + chr(10) + chr(10)).encode('utf-8'))
+                    self._log('>>> Починка применена: %d правок, лог %s' % (total, lp), 'ok')
             else:
-                os.makedirs(os.path.join(HERE, 'logs'), exist_ok=True)
-                lp = os.path.join(HERE, 'logs', 'repair-%s.md' % time.strftime('%Y-%m-%d'))
-                io.open(lp, 'ab').write((chr(10).join(lines) + chr(10) + chr(10)).encode('utf-8'))
-                self._log('>>> Починка применена: %d правок, лог %s' % (total, lp), 'ok')
-        else:
-            self._log('>>> Починка: проблем не найдено', 'ok')
+                self._log('>>> Починка: проблем не найдено', 'ok')
+
+        self._bg(work, done)
 
     # 29.09: деобфускация имён (deob.py, сторонний скрипт юзера) — режим Обслуживания
 
@@ -2044,10 +2229,11 @@ class App(ctk.CTk):
                '-o', out, '-m', mapf]
         try:
             r = subprocess.run(cmd, capture_output=True, text=True,
-                               encoding='utf-8', errors='replace', timeout=300)
+                               encoding='utf-8', errors='replace', timeout=300,
+                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
             return r.returncode == 0, (r.stdout or '') + (r.stderr or '')
         except Exception as ex:
-            return False, 'ошибка запуска deob.py: %s' % ex
+            return False, 'ошибка запуска deob2.py: %s' % ex
 
     def _deob_default_path(self, last):
         # 20.10 (аудит): дефолт был папкой приёмника — первый СКАН всегда
@@ -2079,7 +2265,10 @@ class App(ctk.CTk):
                 for l in rep.splitlines():
                     if l.strip():
                         self._log('  ' + l)
-            self.after(0, upd)
+            try:
+                self.after(0, upd)
+            except Exception:
+                pass
         import threading
         threading.Thread(target=work, daemon=True).start()
 
@@ -2101,7 +2290,10 @@ class App(ctk.CTk):
                 for l in rep.splitlines():
                     if l.strip():
                         self._log('  ' + l)
-            self.after(0, upd)
+            try:
+                self.after(0, upd)
+            except Exception:
+                pass
         import threading
         threading.Thread(target=work, daemon=True).start()
 
@@ -2167,7 +2359,14 @@ class App(ctk.CTk):
         # 29.09: выбор режима конверта — hex / dec / оба
         rmode, rmi = self._card(win, 'Режим')
         rmode.pack(fill='x', padx=8, pady=4)
-        v_mode = ctk.StringVar(value=self.cfg.get('rawconv', {}).get('last_mode', 'both'))
+        # 20.10 (аудит): last_mode раньше сохранялся как rawc_hex —
+        # при следующем открытии ни одна радиокнопка не выбиралась.
+        _rm = self.cfg.get('rawconv', {}).get('last_mode', 'both')
+        if _rm.startswith('rawc_'):
+            _rm = _rm[5:]
+        if _rm not in ('both', 'hex', 'dec', 'jhex'):
+            _rm = 'both'
+        v_mode = ctk.StringVar(value=_rm)
         for val, txt, tip in (
             ('both', 'оба', 'hex-литералы (0x416D7266) и десятичные (1097691750).\nСначала hex, потом dec.'),
             ('hex', 'hex', "только 0xXXXXXXXX -> 'RAWC'"),
@@ -2195,7 +2394,7 @@ class App(ctk.CTk):
                               fg_color=OKGREEN, hover_color=OKGREEN_H,
                               command=lambda: self._rawconv_apply(e_dir, lbl, rc, v_mode, v_dir, v_to))
         b_run.pack(side='left', padx=3, pady=2)
-        Tooltip(b_run, 'Заменить литералы выбранного режима на \'RAWC\' (base-256).\\nПеред записью — бэкап, лог замен рядом с файлом.')
+        Tooltip(b_run, 'Заменить литералы выбранного режима на \'RAWC\' (base-256).\nПеред записью — бэкап, лог замен рядом с файлом.')
 
         # 29.09: авто-подгонка под контент (нижние кнопки не обрезаются)
         self._fit_toplevel(win, min_w=760, min_h=420)
@@ -2228,35 +2427,42 @@ class App(ctk.CTk):
             messagebox.showwarning('Путь', 'Укажи файл или папку карты.')
             return
         self.cfg.setdefault('rawconv', {})['last_path'] = p
-        mode = v_mode.get() if v_mode else 'both'
+        base_mode = v_mode.get() if v_mode else 'both'
+        mode = base_mode
         direction = v_dir.get() if v_dir else 'to'
         to_form = v_to.get() if v_to else 'hex'
         if direction == 'from':
             mode = 'rawc_' + to_form
         self.cfg.setdefault('rawconv', {})['last_dir'] = direction
         self.cfg['rawconv']['last_to'] = to_form
-        self.cfg['rawconv']['last_mode'] = mode
+        # 20.10: храним базовый режим, а не вычисленный rawc_*
+        self.cfg['rawconv']['last_mode'] = base_mode
         self._save_cfg()
+
         def work():
             try:
                 res = rc.scan(p, mode)
-                win_txt = '\n'.join('%s: %d литералов' % (fp, n) for fp, n in res) if res \
+                return '\n'.join('%s: %d литералов' % (fp, n) for fp, n in res) if res \
                     else 'скрипт карты не найден'
             except Exception as ex:
-                win_txt = 'ошибка скана: %s' % ex
-            def upd():
+                return 'ошибка скана: %s' % ex
+
+        def done(win_txt):
+            try:
                 lbl.configure(text=win_txt)
                 self._log('>>> Конверт равкодов, скан: ' + win_txt.replace('\n', ' | '))
-            self.after(0, upd)
-        import threading
-        threading.Thread(target=work, daemon=True).start()
+            except Exception:
+                pass
+
+        self._bg(work, done)
 
     def _rawconv_apply(self, e_dir, lbl, rc, v_mode=None, v_dir=None, v_to=None):
         p = e_dir.get().strip()
         if not p:
             messagebox.showwarning('Путь', 'Укажи файл или папку карты.')
             return
-        mode = v_mode.get() if v_mode else 'both'
+        base_mode = v_mode.get() if v_mode else 'both'
+        mode = base_mode
         direction = v_dir.get() if v_dir else 'to'
         to_form = v_to.get() if v_to else 'hex'
         if direction == 'from':
@@ -2264,27 +2470,39 @@ class App(ctk.CTk):
         dir_txt = 'туда' if direction == 'to' else 'обратно (%s)' % to_form
         if not messagebox.askyesno('Конверт', 'Заменить литералы (%s)?\nНаправление: %s\nПеред записью — бэкап, лог замен рядом с файлом.' % (mode, dir_txt)):
             return
+        self.cfg.setdefault('rawconv', {})['last_path'] = p
+        self.cfg['rawconv']['last_dir'] = direction
+        self.cfg['rawconv']['last_to'] = to_form
+        # 20.10: базовый режим (hex/dec/both/jhex) без префикса rawc_
+        self.cfg['rawconv']['last_mode'] = base_mode
+        self._save_cfg()
+        bdir = os.path.join(self._cfg_dir(), 'transfer_backup', 'rawconv')
+
         def work():
+            # 20.10: lines инициализируется ВСЕГДА — раньше при исключении
+            # upd() падал с NameError и ошибка не доходила до журнала.
+            lines = []
             try:
-                lines = rc.run(p, os.path.join(HERE, 'transfer_backup', 'rawconv'), apply=True, mode=mode)
-                self.cfg.setdefault('rawconv', {})['last_dir'] = direction
-                self.cfg['rawconv']['last_to'] = to_form
-                self._save_cfg()
-                self.cfg.setdefault('rawconv', {})['last_mode'] = mode
-                self._save_cfg()
+                lines = rc.run(p, bdir, apply=True, mode=mode)
                 txt = '\n'.join(lines)
                 ok = not any('не найден' in l for l in lines)
             except Exception as ex:
                 txt, ok = 'ошибка: %s' % ex, False
-            def upd():
+                lines = [txt]
+            return lines, txt, ok
+
+        def done(res):
+            lines, txt, ok = res
+            try:
                 lbl.configure(text=txt.replace('\n', ' | '))
-                for l in lines if isinstance(lines, list) else [txt]:
+                for l in lines:
                     self._log('  ' + l)
                 self._log('>>> Конверт равкодов: ' + ('готово' if ok else 'НЕ УДАЛОСЬ'),
                           'ok' if ok else 'err')
-            self.after(0, upd)
-        import threading
-        threading.Thread(target=work, daemon=True).start()
+            except Exception:
+                pass
+
+        self._bg(work, done)
 
     def _cleanup_select_all(self, tree):
         tree.selection_set(tree.get_children())
@@ -2309,7 +2527,7 @@ class App(ctk.CTk):
         self._repair_tables(self.e_tgt)
 
     def _cleanup_open_log(self):
-        p = os.path.join(HERE, 'logs')
+        p = os.path.join(self._cfg_dir(), 'logs')
         if os.path.isdir(p):
             fs = sorted([f for f in os.listdir(p) if f.startswith('cleanup-')])
             if fs:
