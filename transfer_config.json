@@ -43,7 +43,7 @@
   "ui": {
     "enabled": false,
     "_comment": "true ТОЛЬКО для полного переноса карты-источника как отдельного проекта",
-    "mode": "transfer"
+    "mode": "service"
   },
   "code": {
     "enabled": true,
@@ -73,7 +73,7 @@
     "recount_z": true
   },
   "testspawn": {
-    "enabled": true,
+    "enabled": false,
     "heroes": [
       "Hgam",
       "Hpal"
