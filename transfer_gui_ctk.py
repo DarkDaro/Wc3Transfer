@@ -260,7 +260,9 @@ class App(ctk.CTk):
         w0 = min(1264, sw - 40)
         h0 = min(1130, sh - 90)
         self.geometry('%dx%d' % (w0, h0))
-        self.minsize(min(1180, w0), min(900, h0))
+        # 22.10 (UI): с вкладками окно живёт и в малом размере — всё
+        # содержимое прокручивается (колонка этапов, настройки, Обслуживание)
+        self.minsize(min(1000, w0), min(620, h0))
         self.cfg = {}
         self.stage_vars = {}
         self.q = queue.Queue()
@@ -306,9 +308,10 @@ class App(ctk.CTk):
         # затирал баннер Обслуживания и не восстанавливался — теперь единая
         # точка правды: и _apply_mode, и завершение прогона зовут её.
         serv = self.mode_seg.get() == 'Обслуживание'
+        # 22.10: text_color=None крашит CTk — всегда явный цвет
         self.head_status.configure(
             text='РЕЖИМ: ОБСЛУЖИВАНИЕ (только приёмник)' if serv else 'готов',
-            text_color=WARN if serv else None)
+            text_color=WARN if serv else ("gray35", "gray62"))
 
     def _stop_run(self):
         # 20.10 (аудит): остановка висящего прогона.
@@ -415,11 +418,33 @@ class App(ctk.CTk):
         except Exception:
             pass
 
+    def _on_tab(self):
+        """22.10 (UI): выбор вкладки меняет режим (Перенос/Обслуживание).
+        Журнал режим не трогает. Защита от взаимного цикла — _tab_guard."""
+        if getattr(self, '_tab_guard', False):
+            return
+        self._tab_guard = True
+        try:
+            t = self.tabview.get()
+            if t in ('Перенос', 'Обслуживание'):
+                self.mode_seg.set(t)
+                self._apply_mode()
+        finally:
+            self._tab_guard = False
+
     def _apply_mode(self):
         """19.09 (v7): режим Перенос/Обслуживание.
         Обслуживание — только приёмник: донор-этапы и
-        кнопки переноса disabled, кнопки обслуживания активны."""
+        кнопки переноса disabled, кнопки обслуживания активны.
+        22.10 (UI): режим синхронизирован с вкладками."""
         serv = self.mode_seg.get() == 'Обслуживание'
+        try:
+            if not getattr(self, '_tab_guard', False):
+                self._tab_guard = True
+                self.tabview.set('Обслуживание' if serv else 'Перенос')
+                self._tab_guard = False
+        except Exception:
+            self._tab_guard = False
         # поля донора
         try:
             self.e_src.configure(state='disabled' if serv else 'normal')
@@ -443,10 +468,14 @@ class App(ctk.CTk):
         # кнопки обслуживания — активны всегда, в обслуживании подсвечены
         # 19.09 (вечер): + чистка триггеров (новая функция)
         # 21.09: + конверт равкодов
+        # 22.10: border_color=None крашит CTk (проверка цвета) —
+        # подсветку ставим только в режиме Обслуживание
         for b in (self.b_verify, self.b_cleanup, self.b_repair, self.b_trigclean, self.b_rawconv):
             try:
-                b.configure(border_width=2 if serv else 0,
-                            border_color=ACCENT if serv else None)
+                if serv:
+                    b.configure(border_width=2, border_color=ACCENT)
+                else:
+                    b.configure(border_width=0)
             except Exception:
                 pass
         # сохранить режим
@@ -496,23 +525,108 @@ class App(ctk.CTk):
             except Exception:
                 pass
 
+        # --- 22.10 (UI): статусбар выше вкладок ---
+        # pack отдаёт место в порядке паковки: bottom-виджет пакуется ДО
+        # вкладки с expand, иначе вкладка выдавливает его за край (см. 20.09).
+        sb = ctk.CTkFrame(self, fg_color="transparent")
+        sb.pack(fill="x", side="bottom", padx=10, pady=(0, 6))
+        # 20.10 (аудит): Стоп — теряет зависший этап (timeout есть только в CLI)
+        self.b_stop = ctk.CTkButton(sb, text='Стоп', width=66, height=26,
+                                    font=FONT_SMALL, state='disabled',
+                                    command=self._stop_run)
+        self.b_stop.pack(side='left', padx=(0, 4))
+        self.status = ctk.CTkLabel(sb, text="готов", anchor="w",
+                                   font=FONT_SMALL, height=24)
+        self.status.pack(side="left", fill="x", expand=True)
+        self.pct_lbl = ctk.CTkLabel(sb, text="", width=44, anchor="e",
+                                    font=FONT_SMALL)
+        self.pct_lbl.pack(side="left", padx=(6, 0))
+        self.pbar = ctk.CTkProgressBar(sb, height=8)
+        self.pbar.set(0)
+        self.pbar.pack(side="left", fill="x", expand=True, padx=(8, 0))
+        Tooltip(self.pbar, "Прогресс по этапам переноса.\nПолоска заполняется по мере прохождения этапов.")
+
+        # --- 22.10 (UI): вкладки вместо одной высокой простыни ---
+        # «Перенос» (карты, этапы, настройки, кнопки прогона),
+        # «Обслуживание» (проверка, чистки, код, отчёты),
+        # «Журнал» (прогресс + журнал во всю высоту).
+        # Переключатель режима в шапке синхронизирован с вкладкой.
+        self._tab_guard = False
+        self.tabview = ctk.CTkTabview(self)
+        self.tabview.pack(fill="both", expand=True, padx=8, pady=(6, 0))
+        for tabname in ("Перенос", "Обслуживание", "Журнал"):
+            self.tabview.add(tabname)
+        self.tabview.configure(command=lambda _v=None: self._on_tab())
+        tab_t = self.tabview.tab("Перенос")
+        tab_s = self.tabview.tab("Обслуживание")
+        tab_j = self.tabview.tab("Журнал")
+
+        # содержимое вкладки Обслуживание: прокручиваемые группы операций
+        svc_scroll = ctk.CTkScrollableFrame(tab_s, fg_color="transparent")
+        svc_scroll.pack(fill="both", expand=True)
+        ctk.CTkLabel(svc_scroll, text="Работа с одной картой (без донора).\n"
+                     "Карта выбирается в подокне каждой операции; верификация берёт приёмник из поля на вкладке Перенос.",
+                     font=FONT_SMALL, justify="left").pack(anchor="w", padx=6, pady=(4, 6))
+        svc_rows = {}
+
+        def svc_group(title):
+            f = ctk.CTkFrame(svc_scroll, fg_color=("gray96", "gray13"),
+                             corner_radius=10, border_width=1,
+                             border_color=("gray86", "gray24"))
+            f.pack(fill="x", pady=4)
+            ctk.CTkLabel(f, text=title, font=("Segoe UI", 12, "bold"),
+                         anchor="w").pack(fill="x", padx=12, pady=(6, 2))
+            inner = ctk.CTkFrame(f, fg_color="transparent")
+            inner.pack(fill="x", padx=8, pady=(0, 4))
+            svc_rows[title] = inner
+            return inner
+
+        svc_chk = svc_group("Проверка и чистка")
+        svc_code = svc_group("Триггеры и код")
+        svc_misc = svc_group("Отчёты и прочее")
+        self._svc_pos = {}
+
+        def ab_svc(group, text, cmd, hint_text=None, color=None):
+            parent = svc_rows[group]
+            i = self._svc_pos.setdefault(group, 0)
+            self._svc_pos[group] = i + 1
+            kw = {}
+            if color == 'danger':
+                kw['fg_color'] = DANGER
+                kw['hover_color'] = DANGER_H
+            elif color == 'ok':
+                kw['fg_color'] = OKGREEN
+                kw['hover_color'] = OKGREEN_H
+            elif color == 'warn':
+                kw['fg_color'] = WARN
+                kw['hover_color'] = WARN_H
+            b = ctk.CTkButton(parent, text=text, height=34, width=215,
+                              font=FONT_SMALL, command=cmd, **kw)
+            r, c = divmod(i, 3)
+            b.grid(row=r, column=c, padx=6, pady=6, sticky="w")
+            if hint_text:
+                Tooltip(b, hint_text)
+            return b
+
         # --- 1. Карты ---
-        cf, ci = self._card(self, "1. Карты")
+        cf, ci = self._card(tab_t, "1. Карты")
         cf.pack(fill="x", padx=10, pady=(8, 4))
         self.e_src = self._path_row(ci, "Источник (донор):",
-            "Папка карты-донора в lni-формате (распакованная w3x2lni).\nНапример: G:\\w3x2lni\\UFS10")
+            "Папка карты-донора в lni-формате (распакованная w3x2lni).\nНапример: G:\\w3x2lni\\UFS10", key='src')
         self.e_tgt = self._path_row(ci, "Приёмник:",
-            "Папка карты, КОТОРУЮ ДОПОЛНЯЕМ.\nСнапшоты изменяемых файлов делаются автоматически.")
+            "Папка карты, КОТОРУЮ ДОПОЛНЯЕМ.\nСнапшоты изменяемых файлов делаются автоматически.", key='map')
         self.e_name = self._text_row(ci, "Название переноса:",
             "Подпись для плана и манифеста (например \"UFS герои -> LoW\").")
 
-        # --- середина: этапы слева, настройки справа ---
-        mid = ctk.CTkFrame(self, fg_color="transparent")
+        # --- середина: этапы слева, настройки справа (вкладка Перенос) ---
+        mid = ctk.CTkFrame(tab_t, fg_color="transparent")
         mid.pack(fill="both", expand=True, padx=10, pady=4)
 
-        # левая колонка: этапы (20.10: карточный стиль как у остальных секций)
-        left = ctk.CTkFrame(mid, fg_color=("gray96", "gray13"), corner_radius=10,
-                            border_width=1, border_color=("gray86", "gray24"))
+        # левая колонка: этапы (22.10 (UI): прокручиваемая — при малой
+        # высоте окна все этапы и опции доступны, а не обрезаны)
+        left = ctk.CTkScrollableFrame(mid, fg_color=("gray96", "gray13"),
+                                      corner_radius=10, width=250,
+                                      border_width=1, border_color=("gray86", "gray24"))
         left.pack(side="left", fill="y", padx=(0, 6), pady=4)
         ctk.CTkLabel(left, text="2. Этапы", font=("Segoe UI", 12, "bold"),
                      anchor="w").pack(fill="x", padx=12, pady=(8, 2))
@@ -752,11 +866,10 @@ class App(ctk.CTk):
         self.e_tsrect.pack(fill="x", pady=(0, 6))
         Tooltip(self.e_tsrect, "center или пусто — спавн в центре карты (0, 0).\nИначе — имя региона (gg_rct_team_1_spawn).")
 
-        # --- кнопки (2 ряда, как в v5) ---
-        btns = ctk.CTkFrame(self, fg_color="transparent")
+        # --- кнопки (22.10 (UI): на вкладке Перенос; кнопки обслуживания
+        # переехали на вкладку Обслуживание через ab_svc) ---
+        btns = ctk.CTkFrame(tab_t, fg_color="transparent")
         btns.pack(fill="x", padx=10, pady=4)
-        btns2r = ctk.CTkFrame(self, fg_color="transparent")
-        btns2r.pack(fill="x", padx=10, pady=(0, 4))
 
         def ab(parent, text, cmd, hint_text=None, color=None, w=None):
             kw = {}
@@ -799,55 +912,32 @@ class App(ctk.CTk):
            "Восстановить файлы из снапшота последнего этапа.")
         self.b_reset = ab(btns, "Сброс прогресса", lambda: self._run(['--reset']),
            "Сбросить список пройденных этапов (state).\nНужен после смены пары карт или для повторного прогона.\nState также сбрасывается АВТОМАТИЧЕСКИ при смене source/target.")
-        self.b_manifest = ab(btns2r, "Манифест", self._manifest,
+        self.b_manifest = ab_svc('Отчёты и прочее', "Манифест", self._manifest,
            "Отчёт о переносе в mdlog/transfer/ (что перенесено, конфликты ID).")
-        self.b_verify = ab(btns2r, "Верификация", self._verify_only,
+        self.b_verify = ab_svc('Проверка и чистка', "Верификация", self._verify_only,
            "Только проверка приёмника БЕЗ переноса: битые ссылки,\nдубли секций, циклы _parent, imp.ini, баланс скобок .j.\nБезопасно — ничего не пишет в карту.")
-        self.b_cleanup = ab(btns2r, "Чистка...", self._cleanup_window,
+        self.b_cleanup = ab_svc('Проверка и чистка', "Чистка объектов...", self._cleanup_window,
            "Чистка карты: неиспользуемые объекты, битые равкоды,\nнеудаляемые способности (по суффиксу/равкоду).\n19.09: расстановка карты (war3map.doo/Units.doo) читается —\nюниты/декорации на карте не удаляются.\nСкан -> список -> подтверждение -> удаление. Никаких молчаливых удалений.")
-        self.b_repair = ab(btns2r, "Починить таблицы", self._repair_main,
+        self.b_repair = ab_svc('Проверка и чистка', "Починить таблицы", self._repair_main,
            "Починка таблиц ПРИЁМНИКА (table/*.ini): self-parent,\nбитые _parent, дубли секций, разбаланс [=[ ]=],\n19.09: экранирование строк текста с [ вне блока,\nудаление обрывков описаний.\nПервый клик = скан, второй = починка (бэкап + лог).")
-        self.b_triggers = ab(btns2r, "Триггеры...", self._triggers_window,
+        self.b_triggers = ab_svc('Триггеры и код', "Триггеры...", self._triggers_window,
            "Отдельный перенос триггеров: выбрать подпапки\n(героев/системы) и перенести только их.\nЗапись по правилу v4: папки в корень trigger/.")
-        # 19.09: чистка триггеров (отдельное окно)
-        self.b_trigclean = ab(btns2r, "Чистка триггеров...", self._trigclean_window,
+        self.b_trigclean = ab_svc('Проверка и чистка', "Чистка триггеров...", self._trigclean_window,
            "Чистка триггеров карты: пустые папки, отключённые/\nзакрытые триггеры, неиспользуемые глобалки,\nмёртвые функции. Скан -> список -> подтверждение -> удаление.")
-        # 21.09: конверт равкодов (разовая операция Обслуживания)
-        self.b_rawconv = ab(btns2r, "Конверт равкодов...", self._rawconv_window,
+        self.b_rawconv = ab_svc('Триггеры и код', "Конверт равкодов...", self._rawconv_window,
            "Разовый конверт 0xXXXXXXXX -> 'RAWC' (base-256) в скрипте карты.\nВход: файл .j или папка карты (ищет map/war3map.j, war3map.j,\ntrigger/code.j). Скан -> конверт (бэкап + лог замен).")
-        # 29.09: деобфускация имён (deob.py, сторонняя разработка юзера)
-        self.b_deob = ab(btns2r, "Деобфускация имён...", self._deob_window,
+        self.b_deob = ab_svc('Триггеры и код', "Деобфускация имён...", self._deob_window,
            "Переименование обфусцированных идентификаторов (I/J/1, короткие\nВЕРХНИЕ) в читаемые по типам/семантике + восстановление\nформатирования. VERIFY: OK = токен-эквивалентность.\nВыход: <имя>_deobfuscated.j + rename_map.csv (карта переименований).")
-        # 22.09: TestSpawn — генерация 90-TestSpawn.j по галочке/полям TestSpawn
-        self.b_tspawn = ab(btns2r, "TestSpawn .j", lambda: self._run(['--stage', 'testspawn']),
+        self.b_tspawn = ab_svc('Триггеры и код', "TestSpawn .j", lambda: self._run(['--stage', 'testspawn']),
            "Генерирует 90-TestSpawn.j: спавн перенесённых героев\n(точка из поля «Точка спавна», по умолчанию центр карты 0,0).\nВызов в игре: call ExecuteFunc(\"TestSpawn__I\").")
-        ab(btns2r, "Открыть папку", lambda: os.startfile(HERE))
+        ab_svc('Отчёты и прочее', "Открыть папку", lambda: os.startfile(HERE))
 
         # --- статусбар ---
-        # 20.09: паковался ПОСЛЕ журнала (expand) -> выдавливался за край
-        # окна при восстановлении сохранённой геометрии. Pack отдаёт место
-        # в порядке паковки: пакуем ПЕРВЫМ (side bottom) — гарантированно
-        # виден; журнал (expand) получает то, что осталось.
-        sb = ctk.CTkFrame(self, fg_color="transparent")
-        sb.pack(fill="x", side="bottom", padx=10, pady=(0, 6))
-        # 20.10 (аудит): Стоп — теряет зависший этап (timeout есть только в CLI)
-        self.b_stop = ctk.CTkButton(sb, text='Стоп', width=66, height=26,
-                                    font=FONT_SMALL, state='disabled',
-                                    command=self._stop_run)
-        self.b_stop.pack(side='left', padx=(0, 4))
-        self.status = ctk.CTkLabel(sb, text="готов", anchor="w",
-                                   font=FONT_SMALL, height=24)
-        self.status.pack(side="left", fill="x", expand=True)
-        self.pct_lbl = ctk.CTkLabel(sb, text="", width=44, anchor="e",
-                                    font=FONT_SMALL)
-        self.pct_lbl.pack(side="left", padx=(6, 0))
-        self.pbar = ctk.CTkProgressBar(sb, height=8)
-        self.pbar.set(0)
-        self.pbar.pack(side="left", fill="x", expand=True, padx=(8, 0))
-        Tooltip(self.pbar, "Прогресс по этапам переноса.\nПолоска заполняется по мере прохождения этапов.")
+        # 22.10 (UI): перенесён выше вкладок (до них по порядку паковки).
 
-        # --- прогресс-лента (20.09: до журнала — не выдавливается) ---
-        pf, pi = self._card(self, "Прогресс (state)")
+        # --- прогресс-лента + журнал: вкладка «Журнал» ---
+        # 20.09: до журнала — не выдавливается
+        pf, pi = self._card(tab_j, "Прогресс (state)")
         pf.pack(fill="x", padx=10, pady=(4, 4))
         row = ctk.CTkFrame(pi, fg_color="transparent")
         row.pack(fill="x")
@@ -871,8 +961,8 @@ class App(ctk.CTk):
             self.prog_labels[s] = lbl
         Tooltip(pf, "Прогресс привязан к паре карт: смена источника/приёмника\nавтоматически сбрасывает список пройденных этапов.\nНесколько конфигов = независимые прогоны (свой state у каждого).")
 
-        # --- журнал ---
-        lf, li = self._card(self, "Журнал")
+        # --- журнал (22.10 (UI): вкладка «Журнал» — во всю высоту) ---
+        lf, li = self._card(tab_j, "Журнал")
         lf.pack(fill="both", expand=True, padx=10, pady=4)
         lbar = ctk.CTkFrame(li, fg_color="transparent")
         lbar.pack(fill="x")
@@ -915,7 +1005,58 @@ class App(ctk.CTk):
 
     # --- строки ввода с кнопкой выбора папки ---
 
-    def _path_row(self, parent, label, hint_text):
+    def _hist(self, key):
+        """22.10 (UI): история путей из конфига (gui.path_history)."""
+        hh = self.cfg.setdefault('gui', {}).setdefault('path_history', {})
+        v = hh.get(key)
+        return list(v) if isinstance(v, list) else []
+
+    def _remember_path(self, key, value):
+        """22.10 (UI): запомнить путь в историю (до 10, свежие сверху).
+        Хранится любой существующий путь: папки и файлы (.j у деоба)."""
+        value = value.strip()
+        if not value or not os.path.exists(value):
+            return
+        hh = self.cfg.setdefault('gui', {}).setdefault('path_history', {})
+        hist = [v for v in (hh.get(key) or [])
+                if os.path.normcase(v) != os.path.normcase(value)]
+        hist.insert(0, value)
+        hh[key] = hist[:10]
+        try:
+            self._save_cfg()
+        except Exception:
+            pass
+
+    def _add_hist(self, entry, key):
+        """22.10 (UI): кнопка ▾ рядом с полем — выпадающий список последних
+        путей. Работает в любом окне: <entry>.get()/insert() не меняются.
+        Вкладываем ПОСЛЕ кнопки «...» (pack аддитивный)."""
+        b = ctk.CTkButton(entry.master, text='▾', width=30, height=30,
+                          font=FONT_SMALL)
+        b.pack(side='left', padx=(0, 3))
+        def _menu():
+            vals = []
+            for v in [entry.get().strip()] + self._hist(key):
+                v = v.strip()
+                if v and os.path.exists(v) and not any(
+                        os.path.normcase(v) == os.path.normcase(w) for w in vals):
+                    vals.append(v)
+            if not vals:
+                return
+            m = tk.Menu(b, tearoff=0)
+            for v in vals:
+                def setv(p=v):
+                    entry.delete(0, 'end')
+                    entry.insert(0, p)
+                m.add_command(label=v, command=setv)
+            try:
+                m.post(b.winfo_rootx(), b.winfo_rooty() + b.winfo_height())
+            except Exception:
+                pass
+        b.configure(command=_menu)
+        return b
+
+    def _path_row(self, parent, label, hint_text, key=None):
         row = ctk.CTkFrame(parent, fg_color="transparent")
         row.pack(fill="x", pady=3)
         ctk.CTkLabel(row, text=label, width=150, anchor="w",
@@ -925,7 +1066,9 @@ class App(ctk.CTk):
         if hint_text:
             Tooltip(e, hint_text)
         ctk.CTkButton(row, text="...", width=36, height=30,
-                      command=lambda: self._pick(e)).pack(side="left")
+                      command=lambda: self._pick(e, key)).pack(side="left")
+        if key:
+            self._add_hist(e, key)
         return e
 
     def _text_row(self, parent, label, hint_text):
@@ -1042,11 +1185,14 @@ class App(ctk.CTk):
 
     # ---------- логика (1-в-1 со старым GUI) ----------
 
-    def _pick(self, entry):
+    def _pick(self, entry, key=None):
         d = filedialog.askdirectory()
         if d:
             entry.delete(0, 'end')
             entry.insert(0, d)
+            # 22.10 (UI): выбранный путь попадает в историю
+            if key:
+                self._remember_path(key, d)
 
     def _log(self, msg, tag=None, scope=None):
         # 19.09 (вечер): scope='transfer' — сообщения переноса;
@@ -2002,6 +2148,8 @@ class App(ctk.CTk):
         Tooltip(e_dir, 'Папка карты в lni-формате (table/*.ini + trigger/).')
         ctk.CTkButton(row, text='...', width=36, height=30,
                       command=lambda: self._cleanup_pick(e_dir)).pack(side='left')
+        # 22.10 (UI): история путей карты рядом с полем
+        self._add_hist(e_dir, 'map')
 
         opts, oi = self._card(win, 'Что чистим')
         opts.pack(fill='x', padx=8, pady=4)
@@ -2135,6 +2283,8 @@ class App(ctk.CTk):
             entry.delete(0, 'end')
             entry.insert(0, d)
             self.cfg.setdefault('cleanup', {})['last_dir'] = d
+            # 22.10 (UI): путь карты попадает в историю
+            self._remember_path('map', d)
             self._save_cfg()
 
     def _cleanup_remember(self, tgt):
@@ -2366,6 +2516,8 @@ class App(ctk.CTk):
         Tooltip(e_file, 'Обычный JASS-скрипт (war3map.j / code.j).\nvJass-директивы //! сохраняются, но не разворачиваются.')
         ctk.CTkButton(row, text='...', width=36, height=30,
                       command=lambda: self._deob_pick(e_file)).pack(side='left')
+        # 22.10 (UI): история файлов .j рядом с полем
+        self._add_hist(e_file, 'j')
 
         info, ii = self._card(win, 'Отчёт')
         info.pack(fill='x', padx=8, pady=4)
@@ -2394,6 +2546,8 @@ class App(ctk.CTk):
         p = filedialog.askopenfilename(filetypes=[('JASS', '*.j'), ('Все файлы', '*.*')])
         if p:
             entry.delete(0, 'end'); entry.insert(0, p)
+            # 22.10 (UI): файл попадает в историю
+            self._remember_path('j', p)
 
     def _deob_run(self, src, out_dir):
         """Прогон deob.py: src -> out_dir/<имя>_deobfuscated.j + rename_map.csv.
@@ -2429,6 +2583,8 @@ class App(ctk.CTk):
             messagebox.showwarning('Путь', 'Укажи файл .j.')
             return
         self.cfg.setdefault('deob', {})['last_path'] = p
+        # 22.10 (UI): файл .j попадает в историю и скана
+        self._remember_path('j', p)
         self._save_cfg()
         lbl.configure(text='сканирую...')
         def work():
@@ -2504,6 +2660,8 @@ class App(ctk.CTk):
         Tooltip(e_dir, 'Файл .j ИЛИ папка карты (lni) — при папке ищутся\nmap/war3map.j, war3map.j, trigger/code.j автоматически.')
         ctk.CTkButton(row, text='...', width=36, height=30,
                       command=lambda: self._rawconv_pick(e_dir)).pack(side='left')
+        # 22.10 (UI): история путей карты рядом с полем
+        self._add_hist(e_dir, 'map')
 
         # 29.09: направление конверта — туда/обратно
         dirc, dirci = self._card(win, 'Направление')
@@ -2588,11 +2746,14 @@ class App(ctk.CTk):
             p = filedialog.askopenfilename(filetypes=[('JASS', '*.j'), ('Все файлы', '*.*')])
             if p:
                 entry.delete(0, 'end'); entry.insert(0, p)
+                # 22.10 (UI): путь в историю (это может быть и карта-папка)
+                self._remember_path('j' if p.lower().endswith('.j') else 'map', p)
         def pick_dir():
             q.destroy()
             p = filedialog.askdirectory()
             if p:
                 entry.delete(0, 'end'); entry.insert(0, p)
+                self._remember_path('map', p)
         fr = ctk.CTkFrame(q, fg_color='transparent'); fr.pack(pady=6)
         ctk.CTkButton(fr, text='Файл', width=100, command=pick_file).pack(side='left', padx=6)
         ctk.CTkButton(fr, text='Папка', width=100, command=pick_dir).pack(side='left', padx=6)
