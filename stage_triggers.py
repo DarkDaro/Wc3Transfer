@@ -135,12 +135,18 @@ def code_files(tgt, include_codej):
     return files
 
 
-def collect_functions(files):
-    """{имя: [пути]} — все объявления function."""
+def collect_functions(files, texts=None):
+    """{имя: [пути]} — все объявления function.
+    21.10: texts — кэш {путь: текст}; файлы не перечитываются
+    на каждой итерации каскада."""
     funcs = {}
     for p in files:
         try:
-            s = rp(p)
+            s = (texts or {}).get(p)
+            if s is None:
+                s = rp(p)
+                if texts is not None:
+                    texts[p] = s
         except OSError:
             continue
         for m in re.finditer(r'^\s*function\s+([A-Za-z_][A-Za-z0-9_]*)\s', s, re.M):
@@ -148,17 +154,25 @@ def collect_functions(files):
     return funcs
 
 
-def collect_calls(files, own_names):
+def collect_calls(files, own_names, texts=None):
     """Множество имён, встречающихся как вызов/ссылка.
     Ловит: Имя( , ExecuteFunc("Имя"), 'Имя' в строках
     (коллбеки), Condition(Имя) и любые другие ссылки
-    по слову целиком."""
+    по слову целиком.
+    21.10: texts — общий кэш текстов с collect_functions."""
     called = set()
-    for p in files:
+    for i, p in enumerate(files):
         try:
-            s = rp(p)
+            s = (texts or {}).get(p)
+            if s is None:
+                s = rp(p)
+                if texts is not None:
+                    texts[p] = s
         except OSError:
             continue
+        # 21.10: хартбит каждые 100 файлов — видно движение в стриме
+        if (i + 1) % 100 == 0:
+            print('    вызовы: %d/%d файлов' % (i + 1, len(files)))
         # строковые литералы: ExecuteFunc('Имя') и прочие
         for m in re.finditer(r"'([A-Za-z_][A-Za-z0-9_]*)'", s):
             called.add(m.group(1))
@@ -303,11 +317,14 @@ def scan_globals(tgt, files_code):
                 names.append(m.group(1))
     # 19.09: собираем ВЕСЬ текст карты как источник упоминаний
     all_code = ''
-    for p in files_code:
+    for i, p in enumerate(files_code):
         try:
             all_code += rp(p)
         except OSError:
             pass
+        # 21.10: хартбит каждые 100 файлов — видно движение в стриме
+        if (i + 1) % 100 == 0:
+            print('    код: прочитано %d/%d файлов' % (i + 1, len(files_code)))
     extra = [os.path.join(tgt, 'trigger', 'code.j'),
              os.path.join(tgt, 'map', 'war3map.j')]
     for p in extra:
@@ -326,10 +343,16 @@ def scan_globals(tgt, files_code):
                     all_code += rp(fp)
                 except OSError:
                     pass
+    # 21.10: ОДИН проход по тексту вместо сотни re.search «на каждое
+    # имя по мегабайтам» — поиск udg_имён был главным тормозом скана
+    # (минуты тишины GUI). Списки used/unused формируются проверкой
+    # вхождения в множество; имена валидны тем же регексом, поэтому
+    # результат эквивалентен прежнему.
+    found_udg = set(re.findall(r'\budg_([A-Za-z_][A-Za-z0-9_]*)\b', all_code))
     used = []
     unused = []
     for n in names:
-        if re.search(r'\budg_%s\b' % re.escape(n), all_code):
+        if n in found_udg:
             used.append(n)
         else:
             unused.append(n)
@@ -348,6 +371,9 @@ def scan_dead_funcs(tgt, cascade, include_codej, exclude=None):
              if not any(pt.lower() in excl
                         for pt in os.path.relpath(p, tgt).split(os.sep))]
     funcs = collect_functions(files)
+    # 21.10: кэш текстов файлов — каскад больше не перечитывает
+    # файлы на каждой итерации (было O(итерации * файлы * байты))
+    texts = {}
     # исключения: никогда не удалять
     NEVER = {'main', 'InitCustomTriggers', 'InitGlobals',
              'InitCustomPlayerSlots', 'InitTeams', 'InitAllyPriorities',
@@ -355,7 +381,7 @@ def scan_dead_funcs(tgt, cascade, include_codej, exclude=None):
     dead = {}
     alive_files = list(files)
     while True:
-        called = collect_calls(alive_files, set(funcs))
+        called = collect_calls(alive_files, set(funcs), texts)
         new_dead = {}
         for name, fps in funcs.items():
             if name in dead:
@@ -383,7 +409,10 @@ def scan_dead_funcs(tgt, cascade, include_codej, exclude=None):
         dead_set = set(dead)
         for p in files:
             try:
-                s = rp(p)
+                s = texts.get(p)
+                if s is None:
+                    s = rp(p)
+                    texts[p] = s
             except OSError:
                 continue
             # грубая проверка: файл содержит живые функции?
@@ -418,12 +447,19 @@ def main():
         opts = json.load(io.open(sys.argv[sys.argv.index('--scan') + 1], 'rb'))
         # 19.09 (вечер): исключения — имена папок из конфига/opts
         exclude = opts.get('exclude_dirs') or cfg.get('cleanup', {}).get('exclude_dirs', [])
+        # 21.10: шаги скана печатаются сразу — GUI стримит вывод
+        # построчно, и пользователь видит движение
         files = code_files(tgt, opts.get('include_codej', False))
+        print('  файлов кода: %d' % len(files))
         funcs = collect_functions(files)
+        print('  функций: %d' % len(funcs))
         called = collect_calls(files, funcs)
+        print('  шаг: отключённые триггеры...')
         res = {}
         if opts.get('empty_dirs', True):
+            print('  шаг: пустые папки/txt...')
             ed, et = scan_empty_dirs(tgt, opts.get('del_empty_txt', True), exclude=exclude)
+            print('    пустых папок: %d, txt: %d' % (len(ed), len(et)))
             res['empty_dirs'] = [os.path.relpath(p, tgt) for p in ed]
             res['empty_txt'] = [os.path.relpath(p, tgt) for p in et]
         if opts.get('disabled', True) or opts.get('closed', False) or opts.get('comments', False):
@@ -432,16 +468,21 @@ def main():
                                             files, funcs, called,
                                             comments=opts.get('comments', False),
                                             exclude=exclude)
+            print('    отключённых: %d' % len(res.get('disabled', [])))
         if opts.get('globals', False):
+            print('  шаг: глобалки...')
             un, us = scan_globals(tgt, files)
+            print('    unused: %d, used: %d' % (len(un), len(us)))
             res['globals_unused'] = un
             res['globals_used'] = us
         if opts.get('dead_funcs', False):
+            print('  шаг: мёртвые функции...')
+            dfd = scan_dead_funcs(tgt, opts.get('cascade', True),
+                                  opts.get('include_codej', False),
+                                  exclude=exclude)
+            print('    мёртвых: %d' % len(dfd))
             res['dead_funcs'] = {n: [os.path.relpath(f, tgt) for f in fps]
-                                 for n, fps in scan_dead_funcs(
-                                     tgt, opts.get('cascade', True),
-                                     opts.get('include_codej', False),
-                                     exclude=exclude).items()}
+                                 for n, fps in dfd.items()}
         outp = os.path.join(here, 'triggers_scan.json')
         wp(outp, json.dumps(res, ensure_ascii=False, indent=1))
         print('скан ->', outp)

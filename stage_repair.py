@@ -77,11 +77,19 @@ def collect_ids(tgt):
     return ids
 
 
-def repair(tgt, log_dir, backup_dir, do=True, cfgp=None):
-    """Возвращает (строки_отчёта, число_правок)."""
+def repair(tgt, log_dir, backup_dir, do=True, cfgp=None, progress=None):
+    """Возвращает (строки_отчёта, число_правок).
+    21.10: progress(msg) — GUI показывает, какая таблица чинится."""
+    def _p(msg):
+        if progress:
+            try:
+                progress(msg)
+            except Exception:
+                pass
     stamp = time.strftime('%Y-%m-%d_%H%M%S')
     report = ['# Починка таблиц %s' % time.strftime('%Y-%m-%d %H:%M:%S'), '']
     std = load_std_ids(cfgp)
+    _p('сбор ID...')
     all_ids = collect_ids(tgt)
     total = 0
     if do:
@@ -90,6 +98,7 @@ def repair(tgt, log_dir, backup_dir, do=True, cfgp=None):
         p = os.path.join(tgt, 'table', t + '.ini')
         if not os.path.exists(p):
             continue
+        _p('таблица %s...' % t)
         s = io.open(p, 'rb').read().decode('utf-8', errors='replace')
         lines = s.splitlines()
         out = []

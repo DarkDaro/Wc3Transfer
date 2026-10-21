@@ -352,6 +352,42 @@ class App(ctk.CTk):
     def _cfg_dir(self):
         return os.path.dirname(os.path.abspath(self._cfg_path()))
 
+    def _run_streamed(self, cmd, prefix='  '):
+        """21.10: потоковый запуск инструмента — вывод идёт в журнал
+        ПОСТРОЧНО. Раньше подокна собирали вывод subprocess.run до конца:
+        GUI молчал минуты на тяжёлом скане. Возвращает (код, текст)."""
+        env = {**os.environ, 'PYTHONUTF8': '1', 'PYTHONIOENCODING': 'utf-8'}
+        flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+        try:
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True,
+                                 encoding='utf-8', errors='replace',
+                                 env=env, cwd=HERE, creationflags=flags, bufsize=1)
+        except Exception as e:
+            return 1, 'ошибка запуска: %s' % e
+        self._tool_proc = p
+        lines = []
+        for ln in p.stdout:
+            ln = ln.rstrip()
+            if not ln:
+                continue
+            lines.append(ln)
+            low = ln.lower()
+            tag = 'err' if ('ошибка' in low or 'error' in low) else \
+                  ('warn' if ('внимание' in low or 'warning' in low) else None)
+            self.q.put((prefix + ln[:160], tag, None))
+        p.wait()
+        self._tool_proc = None
+        return p.returncode, '\n'.join(lines)
+
+    def _win_beat(self, win, lbl, text, stop):
+        """21.10: секундный таймер в подокне — «скан идёт: N сек»."""
+        t0 = time.time()
+        while not stop['f']:
+            time.sleep(1)
+            self._safe_after(win, lambda s=int(time.time() - t0):
+                             lbl.configure(text='%s: %d сек...' % (text, s)))
+
     def _bg(self, work, done=None):
         """20.10: фоновая задача без заморозки UI. work() -> результат,
         done(результат) выполняется в главном потоке."""
@@ -1306,14 +1342,18 @@ class App(ctk.CTk):
     def _manifest(self):
         self._save_cfg()
         cmd = [sys.executable, os.path.join(HERE, 'make_manifest.py'), CFG]
+        self._log('>>> Манифест деплоя', 'ok')
 
+        # 21.10: вывод стримится в журнал построчно (было: capture до
+        # конца — GUI молчал, пока манифест не дочитает карту)
         def work():
-            flags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
-            r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8',
-                               errors='replace', cwd=HERE, creationflags=flags)
-            return ((r.stdout or '') + (r.stderr or '')).strip()
+            return self._run_streamed(cmd)
 
-        self._bg(work, lambda txt: self._log(txt))
+        def done(res):
+            code = res[0] if isinstance(res, tuple) else 1
+            self._log('>>> Манифест: код %d' % code, 'ok' if code == 0 else 'err')
+
+        self._bg(work, done)
 
     def _worker(self, cmd, scope=None):
         try:
@@ -1614,18 +1654,24 @@ class App(ctk.CTk):
         self._log('>>> Чистка триггеров: скан %s' % tgt)
         tree = self._trigclean_state['tree']
         tree.delete(*tree.get_children())
+        # 21.10: секундный таймер — окно показывает «скан идёт: N сек»
+        stop_beat = {'f': False}
+        threading.Thread(target=self._win_beat, daemon=True,
+                         args=(win, lbl, 'скан идёт', stop_beat)).start()
+
         def work():
             try:
                 # 20.10: --dir — чистим именно ту карту, что в поле окна
-                r = subprocess.run([sys.executable, '-u', os.path.join(HERE, 'stage_triggers.py'),
-                                    CFG, '--dir', tgt, '--scan', opath],
-                                   capture_output=True, text=True, encoding='utf-8',
-                                   errors='replace', cwd=HERE, timeout=600,
-                                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-                self._safe_after(win, lambda: self._trigclean_show(
-                    r.returncode, (r.stdout or '') + (r.stderr or ''), tgt, opts))
+                # 21.10: стрим — вывод этапа в журнал вживую
+                code, out = self._run_streamed(
+                    [sys.executable, '-u', os.path.join(HERE, 'stage_triggers.py'),
+                     CFG, '--dir', tgt, '--scan', opath])
             except Exception as e:
-                self._safe_after(win, lambda: self._trigclean_show(1, str(e), tgt, opts))
+                code, out = 1, str(e)
+            finally:
+                stop_beat['f'] = True
+            self._safe_after(win, lambda: self._trigclean_show(
+                code, out, tgt, opts))
         threading.Thread(target=work, daemon=True).start()
 
     def _trigclean_show(self, code, out, tgt, opts):
@@ -1639,10 +1685,13 @@ class App(ctk.CTk):
                 return
         except Exception:
             return
-        for l in out.splitlines():
-            if l.strip():
-                self._log('  ' + l[:160])
+        # 21.10: строки уже ушли в журнал стримом (_run_streamed) —
+        # в журнал дублируем только при провале запуска
+        if code != 0 and out and not out.startswith('ошибка запуска'):
+            pass
         if code != 0:
+            if out:
+                self._log(out, 'err')
             lbl.configure(text='скан не удался')
             self._log('>>> Скан триггеров: ОШИБКА', 'err')
             return
@@ -1728,6 +1777,12 @@ class App(ctk.CTk):
         jp = os.path.join(self._cfg_dir(), 'triggers_delete.json')
         io.open(jp, 'wb').write(json.dumps(d, ensure_ascii=False, indent=1).encode('utf-8'))
         lbl.configure(text='демо...' if dry else 'удаление...')
+        win_d = st['win']
+        stop_beat = {'f': False}
+        threading.Thread(target=self._win_beat, daemon=True,
+                         args=(win_d, lbl, 'демо идёт' if dry else 'удаление идёт',
+                               stop_beat)).start()
+
         def work():
             try:
                 cmd = [sys.executable, '-u', os.path.join(HERE, 'stage_triggers.py'),
@@ -1735,26 +1790,24 @@ class App(ctk.CTk):
                 # 19.09 (вечер): ДЕМО — флаг --dry, без записи
                 if dry:
                     cmd.append('--dry')
-                r = subprocess.run(cmd,
-                                   capture_output=True, text=True, encoding='utf-8',
-                                   errors='replace', cwd=HERE, timeout=600,
-                                   creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-                win = st['win']
-                out = (r.stdout or '') + (r.stderr or '')
-                if dry:
-                    # открыть демо-лог (строка ЛОГ: путь)
-                    for l in out.splitlines():
-                        if l.startswith('ЛОГ: '):
-                            try:
-                                os.startfile(l[5:].strip())
-                            except Exception:
-                                pass
-                            break
-                    self._safe_after(win, lambda: self._trigclean_deleted(r.returncode, out, len(sel), lbl, tree, [], dry=True))
-                else:
-                    self._safe_after(win, lambda: self._trigclean_deleted(r.returncode, out, len(sel), lbl, tree, sel, dry=dry))
+                # 21.10: стрим — вывод в журнал вживую
+                code, out = self._run_streamed(cmd)
             except Exception as e:
-                self._safe_after(st['win'], lambda: self._trigclean_deleted(1, str(e), 0, lbl, tree, sel))
+                code, out = 1, str(e)
+            finally:
+                stop_beat['f'] = True
+            if dry:
+                # открыть демо-лог (строка ЛОГ: путь)
+                for l in out.splitlines():
+                    if l.startswith('ЛОГ: '):
+                        try:
+                            os.startfile(l[5:].strip())
+                        except Exception:
+                            pass
+                        break
+                self._safe_after(win_d, lambda: self._trigclean_deleted(code, out, len(sel), lbl, tree, [], dry=True))
+            else:
+                self._safe_after(win_d, lambda: self._trigclean_deleted(code, out, len(sel), lbl, tree, sel, dry=dry))
         threading.Thread(target=work, daemon=True).start()
 
     def _trigclean_deleted(self, code, out, n, lbl, tree, sel, dry=False):
@@ -1763,9 +1816,7 @@ class App(ctk.CTk):
                 return
         except Exception:
             return
-        for l in out.splitlines():
-            if l.strip():
-                self._log('  ' + l[:160])
+        # 21.10: строки уже ушли в журнал стримом — дубли не в журнал
         if code == 0:
             self._log('>>> ДЕМО завершено: ничего не записано, лог открыт' if dry
                       else '>>> Чистка триггеров завершена, лог в logs/', 'ok')
@@ -2060,7 +2111,14 @@ class App(ctk.CTk):
         self._log('>>> Чистка: скан %s ...' % tgt)
 
         def work():
-            return sc.scan(tgt, patterns, manual, protect, cfgp=self._cfg_path())
+            # 21.10: шаги скана видны в окне («проход 1: ability...»)
+            lbl_p = self._cleanup_lbl
+
+            def prog(msg):
+                self._safe_after(lbl_p, lambda: lbl_p.configure(text=msg))
+
+            return sc.scan(tgt, patterns, manual, protect,
+                           cfgp=self._cfg_path(), progress=prog)
 
         def done(res):
             self._cleanup_render(res, tgt, casc, allowed, show_unused, show_bad, show_suf)
@@ -2136,7 +2194,13 @@ class App(ctk.CTk):
         self._log('>>> Чистка: %s %d объектов ...' % ('демо' if dry else 'удаление', len(sel)))
 
         def work():
-            return sc.delete(tgt, del_list, log_dir, bdir, dry=dry)
+            lb = getattr(self, '_cleanup_lbl', None)
+
+            def prog(msg):
+                if lb is not None:
+                    self._safe_after(lb, lambda: lb.configure(text=msg))
+
+            return sc.delete(tgt, del_list, log_dir, bdir, dry=dry, progress=prog)
 
         def done(lines):
             for l in lines:
@@ -2182,7 +2246,13 @@ class App(ctk.CTk):
         bdir = rcfg.get('backup_dir') or os.path.join(self._cfg_dir(), sbd, 'repair')
 
         def work():
-            return sr.repair(tgt, None, bdir, do=not first, cfgp=cfgp)
+            lb = getattr(self, '_cleanup_lbl', None)
+
+            def prog(msg):
+                if lb is not None:
+                    self._safe_after(lb, lambda: lb.configure(text=msg))
+
+            return sr.repair(tgt, None, bdir, do=not first, cfgp=cfgp, progress=prog)
 
         def done(res):
             lines, total = res
@@ -2270,10 +2340,9 @@ class App(ctk.CTk):
         cmd = [sys.executable, os.path.join(HERE, 'deob2.py'), src,
                '-o', out, '-m', mapf]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True,
-                               encoding='utf-8', errors='replace', timeout=300,
-                               creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
-            return r.returncode == 0, (r.stdout or '') + (r.stderr or '')
+            # 21.10: стрим — прогресс deob2.py виден в журнале вживую
+            code, text = self._run_streamed(cmd)
+            return code == 0, text
         except Exception as ex:
             return False, 'ошибка запуска deob2.py: %s' % ex
 

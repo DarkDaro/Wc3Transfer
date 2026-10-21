@@ -231,14 +231,26 @@ def load_std_ids(tgt, cfgp=None):
     return std
 
 
-def scan(tgt, suffix_patterns, manual_ids, protect_ids=None, cfgp=None):
+def scan(tgt, suffix_patterns, manual_ids, protect_ids=None, cfgp=None, progress=None):
     # 19.09: protect_ids = {type: [id,...]} — защитный список
     # (cleanup_protect.json): живые дамми-абилки/баффы, которые
     # сканер не должен помечать неиспользуемыми ни при каких фильтрах
     protect_ids = protect_ids or {}
+    # 21.10: progress(msg) — GUI показывает шаг скана в подокне
+    # (раньше окно молчало с надписью «скан...» в течение минут)
+    def _p(msg):
+        if progress:
+            try:
+                progress(msg)
+            except Exception:
+                pass
+    _p('читаю таблицы...')
     tabs = load_tables(tgt)
+    _p('ссылки (%d секций)...' % sum(len(b) for b in tabs.values()))
     refs = collect_refs(tabs)
+    _p('код карты...')
     code_ids = scan_code_literals(tgt)
+    _p('стандартные и расстановка...')
     std_ids = load_std_ids(tgt, cfgp)
     # 19.09: расстановка карты — юниты/декорации,
     # стоящие на карте, всегда «используемые»
@@ -250,6 +262,7 @@ def scan(tgt, suffix_patterns, manual_ids, protect_ids=None, cfgp=None):
 
     # проход 1: классификация
     for t, bodies in tabs.items():
+        _p('проход 1: %s (секций %d)...' % (t, len(bodies)))
         result['stats'][t] = len(bodies)
         for sid, lines in bodies.items():
             if sid in MUSTUSE.get(t, set()):
@@ -291,6 +304,7 @@ def scan(tgt, suffix_patterns, manual_ids, protect_ids=None, cfgp=None):
     # проход 2: каскадные волны — объекты, чьи владельцы все мертвы
     waves = []
     while True:
+        _p('каскад: волна %d...' % (len(waves) + 1))
         wave = {}
         for t, bodies in tabs.items():
             for sid, lines in bodies.items():
@@ -313,10 +327,17 @@ def scan(tgt, suffix_patterns, manual_ids, protect_ids=None, cfgp=None):
     return result
 
 
-def delete(tgt, del_list, log_dir, backup_dir, dry=False):
+def delete(tgt, del_list, log_dir, backup_dir, dry=False, progress=None):
     """del_list: {type: [id,...]}. Возвращает лог-строки.
     19.09 (вечер): dry=True — ДЕМО: показать что будет
-    удалено, БЕЗ записи в таблицы и без бэкапа."""
+    удалено, БЕЗ записи в таблицы и без бэкапа.
+    21.10: progress(msg) — шаг удаления виден в подокне."""
+    def _p(msg):
+        if progress:
+            try:
+                progress(msg)
+            except Exception:
+                pass
     stamp = time.strftime('%Y-%m-%d_%H%M%S')
     bdir = os.path.join(backup_dir, stamp)
     if not dry:
@@ -334,6 +355,7 @@ def delete(tgt, del_list, log_dir, backup_dir, dry=False):
         if not ids or t not in tabs:
             continue
         p = tabs[t]
+        _p('%s: %d секций...' % (t, len(ids)))
         # 19.09 (вечер): ДЕМО — посчитать секции, не трогать файл
         if dry:
             s = io.open(p, 'rb').read().decode('utf-8', errors='replace')
