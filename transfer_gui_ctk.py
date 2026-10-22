@@ -662,6 +662,19 @@ class App(ctk.CTk):
         c4u.pack(side="left", padx=4)
         Tooltip(c4u, "Юниты донора из war3mapUnits.doo\n"
                      "(стартовые локации sloc пропускаются).")
+        # 22.10: ландшафт (w3e) — по умолчанию выключен (эксперимент)
+        self.v_w3e = tk.BooleanVar(value=False)
+        c4w = ctk.CTkCheckBox(gi1, text="Ландшафт (w3e): замена клеток перекрытия донором",
+                              variable=self.v_w3e, font=FONT_SMALL,
+                              checkbox_width=18, checkbox_height=18)
+        c4w.pack(anchor="w", pady=(4, 0))
+        Tooltip(c4w, "Клетки рельефа приёмника, попадающие в перекрытие "
+                     "с донором (со сдвигом offset), заменяются клетками донора.\n"
+                     "За границей донора рельеф приёмника остаётся.\n"
+                     "Предохранитель: при разных тайлсетах этап откажется "
+                     "(принудительно geometry.w3e.force = true).\n"
+                     "Всегда начинай с Dry-run! Повтор безопасен (замена "
+                     "идемпотентна).")
         gfr = ctk.CTkFrame(gi1, fg_color="transparent")
         gfr.pack(fill="x", pady=(6, 0))
         ctk.CTkLabel(gfr, text="Сдвиг координат offset:", font=FONT_SMALL).pack(side="left")
@@ -1513,6 +1526,13 @@ class App(ctk.CTk):
         else:
             cfg['geometry']['types'] = {'decor': self.v_decor.get(),
                                         'units': self.v_units.get()}
+        # 22.10: ландшафт (w3e); force в конфиге вручную (предохранитель)
+        if self.v_w3e.get():
+            cfg['geometry']['w3e'] = {'enabled': True,
+                                      'force': bool(self.cfg.get('geometry', {})
+                                                    .get('w3e', {}).get('force', False))}
+        else:
+            cfg['geometry'].pop('w3e', None)
         cfg['testspawn']['enabled'] = self.v_ts.get()
         cfg['testspawn']['heroes'] = [t.strip() for t in self.e_ts.get().split(',') if t.strip()]
         # 22.09: точка спавна — 'center' (0,0) или имя региона; конфиг↔UI вместе
@@ -1602,6 +1622,8 @@ class App(ctk.CTk):
         _gt = self.cfg.get('geometry', {}).get('types', {})
         self.v_decor.set(bool(_gt.get('decor', True)))
         self.v_units.set(bool(_gt.get('units', True)))
+        # 22.10: ландшафт w3e — восстановление (нет секции = выкл)
+        self.v_w3e.set(bool(self.cfg.get('geometry', {}).get('w3e', {}).get('enabled', False)))
         self.v_ts.set(self.cfg.get('testspawn', {}).get('enabled', False))
         self.e_ts.delete(0, 'end'); self.e_ts.insert(0, ', '.join(self.cfg.get('testspawn', {}).get('heroes', [])))
         # 22.09: точка спавна — восстановление из конфига
