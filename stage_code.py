@@ -138,6 +138,7 @@ def main():
     # gg_trg_X (TriggerEvaluate(null) = false, триггер мёртв).
     # Универсально: GUI-триггер = наличие .lml, .txt опционален.
     gui_pairs = []
+    orphan_txts = []   # 22.10: .txt без пары .lml (текстовые триггеры/заметки)
     for root, dirs, fs in os.walk(trig_src):
         rel_root = os.path.relpath(root, trig_src)
         if only and rel_root != '.' and not any(rel_root == od or rel_root.startswith(od + os.sep) for od in only):
@@ -150,6 +151,14 @@ def main():
                     continue
                 txt_p = lml_p[:-4] + '.txt'
                 gui_pairs.append((lml_p, txt_p if os.path.exists(txt_p) else None))
+            elif f.endswith('.txt') and not (rel_root == '.' and f == 'code.txt'):
+                # 22.10: осиротевший .txt (БЕЗ парного .lml) — текстовый
+                # триггер или заметка пользователя. Раньше его молча
+                # выбрасывали — терялись «текстовые триггеры» донора.
+                # Корневой code.txt — текстовый спутник code.j (шапка),
+                # его не переносим.
+                if (f[:-4] + '.lml') not in fs and not trig_skipped(os.path.join(root, f)):
+                    orphan_txts.append(os.path.join(root, f))
 
     b_hits = []   # B-литералы (нужен контекст)
     plain_hits = {}
@@ -339,6 +348,19 @@ def main():
             return os.path.join('trigger', folder, base + '.lml')
         return os.path.join('trigger', entry_name, folder + ' ' + base + '.lml')
 
+    def _dst_txt(txt_p):
+        # 22.10: осиротевший .txt — та же раскладка, что у .lml
+        rel_t = os.path.relpath(txt_p, trig_src)
+        folder = os.path.dirname(rel_t)
+        base = os.path.splitext(os.path.basename(txt_p))[0]
+        if not folder or folder == '.':
+            return os.path.join('trigger', entry_name, base + '.txt')
+        if os.sep in folder or '/' in folder:
+            folder = _adj_name(folder)
+        if folders_mode == 'folders' and folder not in FOREIGN:
+            return os.path.join('trigger', folder, base + '.txt')
+        return os.path.join('trigger', entry_name, folder + ' ' + base + '.txt')
+
     # 20.10 (фикс дым-теста): FOREIGN определяем ЗАРАНЕЕ — _dst/_dst_gui
     # ссылаются на него, а folder_keys прогоняет _dst по всем файлам.
     # Ниже только МУТИРУЕМ (.add), не перепривязываем.
@@ -487,6 +509,24 @@ def main():
             written.append(os.path.relpath(dtxt, tgt).replace(os.sep, '/'))
     if n_gui:
         print('GUI-триггеров (пары .lml+.txt) перенесено:', n_gui)
+
+    # 22.10: осиротевшие .txt — текстовые триггеры/заметки донора.
+    # Пишем тем же механизмом, что и GUI-пары; в built_rels запоминаем
+    # свои пути, чтобы builder каталога сделал из них записи (обычные
+    # .txt в каталог не попадают как спутники .lml).
+    built_rels = set()
+    n_orph = 0
+    for txt_p in orphan_txts:
+        d = os.path.join(tgt, _dst_txt(txt_p))
+        os.makedirs(os.path.dirname(d), exist_ok=True)
+        io.open(d, 'wb').write(io.open(txt_p, 'rb').read())
+        rel_d = os.path.relpath(d, tgt).replace(os.sep, '/')
+        written.append(rel_d)
+        built_rels.add(rel_d)
+        n_orph += 1
+    if n_orph:
+        print('текстовых триггеров (.txt без .lml) перенесено:', n_orph)
+
 
     # 18.09 (v5): шапка донора — header-режим.
     # Донор с триггерами имеет code.j в корне trigger
@@ -681,9 +721,11 @@ def main():
                 # его запись уже стоит top-level перед разделителем
                 if rel == header_rel:
                     continue
-                # 21.09 фикс D: .txt (описание GUI-триггера) — не запись
-                # каталога, это спутник .lml; запись уже добавлена с .lml
-                if rel.endswith('.txt'):
+                # 21.09 фикс D: обычный .txt (описание GUI-триггера) — не
+                # запись каталога, это спутник .lml; запись уже добавлена
+                # с .lml. Но 22.10: осиротевшие .txt (built_rels) — САМИ
+                # записи каталога (текстовые триггеры без .lml).
+                if rel.endswith('.txt') and rel not in built_rels:
                     continue
                 parts = rel.split('/')
                 if len(parts) != 3 or parts[0] != 'trigger':
