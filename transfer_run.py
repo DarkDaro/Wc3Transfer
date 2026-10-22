@@ -373,6 +373,14 @@ def main():
         return
 
     if args.all or args.stage or args.dry_run or args.loop:
+        # 22.10 (аудит): шапка прогона в файловом журнале — после смены
+        # донора/приёмника/конфига прогоны в logs/*.log были
+        # неразличимы (append без маркеров)
+        log(cfg, '=== ПРОГОН %s | пара %s -> %s | %s ===' % (
+            ('dry-run ' if args.dry_run else '') + ('loop' if args.loop else
+             'stage ' + args.stage if args.stage else 'all'),
+            cfg['source'], cfg['target'],
+            time.strftime('%Y-%m-%d %H:%M:%S')))
         # 17.09: --loop = полный цикл с повторами: deps->mapping->
         # tables->import->code_cut, пока auto_expand добавляет в deps
         # (макс 5 итераций). code_cut сбрасывает completed для повтора.

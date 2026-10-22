@@ -54,13 +54,18 @@ DEFAULT_CFG = {
                           'war3mapMap.tga', 'war3mapMap.b00', 'minimap', 'LoadingScreen',
                           'loadingscreen', 'loadbar', 'console', 'war3mapMisc.txt',
                           'war3mapShadow', 'war3mapPreview', 'UI/Console', 'UI/'],
-        'check_missing_refs': True,
+        # 22.10 (аудит): check_missing_refs никем не читается — ключ был
+        # мёртвым (включение в конфиге ничего не делало), вынесен.
+        # check_missing_refs: True,
         'allow_override': True,
     },
     'ui': {'enabled': False, 'mode': 'transfer'},
     'code': {
-        'enabled': True, 'folders': 'flat', 'trigger_dirs': [],
-        'shift_coords': {'enabled': False, 'dx': 0.0, 'dy': 0.0, 'ufs_range': 4000.0},
+        'enabled': True, 'folders': 'flat',
+        # 22.10 (аудит): shift_coords/trigger_dirs никем не читаются
+        # (были мёртвыми ключами) — вынесены из тиражирования
+        # 'trigger_dirs': [],
+        # 'shift_coords': {'enabled': False, ...},
         'deploy_to': 'LIA', 'include_monolith': True, 'allow_b': True, 'only_dirs': [],
         'header_mode': 'append', 'func_prefix': 'LIA', 'update_catalog': True,
         'null_broken_gguits': True,
@@ -69,13 +74,18 @@ DEFAULT_CFG = {
     'testspawn': {'enabled': False, 'heroes': [], 'items': True, 'rect': 'center'},
     'mapping': {
         'pkl': 'transfer_mapping.pkl', 'registry': 'target_id_registry.json',
-        'case_conflict_check': True, 'duplicate_name_check': True, 'mode': 'smart',
+        # 22.10 (аудит): case_conflict_check/duplicate_name_check —
+        # мёртвые ключи (никто не читает), вынесены
+        # 'case_conflict_check': True, 'duplicate_name_check': True,
+        'mode': 'smart',
         # prebuilt_dir: ОБЯЗАТЕЛЬНО — prebuilt/Custom из w3x2lni своего патча
         'prebuilt_dir': '',
     },
     'profile': 'custom',
     'safety': {'backup_dir': 'transfer_backup', 'state_file': 'transfer_state.json',
-               'dry_run_first': True, 'stop_on_error': True,
+               # 22.10 (аудит): dry_run_first никем не читался (мёртвый
+               # ключ), вынесен; stop_on_error читается GUI-галочкой
+               'stop_on_error': True,
                'stage_timeout_min': 15},
     'deps': {'roots': []},
     'code_cut': {'enabled': False, 'entries': [], 'output': 'cut_heroes.j', 'auto_expand': True},
@@ -815,8 +825,11 @@ class App(ctk.CTk):
             Tooltip(cb, STAGE_HINTS[s])
             self.stage_vars[s] = v
             self._stage_cbs[s] = [cb]
-        self.stage_vars['geometry'].set(False)
-        self.stage_vars['testspawn'].set(False)
+        # 22.10 (аудит): двойное врато «Геометрия» устранено — чекбокс
+        # этапа и галочка «Переносить декор и юнитов» теперь ОДНА
+        # переменная (иначе галочка вкладки не влияла на --all)
+        self.stage_vars['geometry'] = self.v_geom
+        # (алиас для testspawn ставится после создания v_ts — ниже)
 
         # опции
         ctk.CTkLabel(left, text="Опции", font=("Segoe UI", 12, "bold"),
@@ -959,7 +972,11 @@ class App(ctk.CTk):
                      font=FONT_SMALL, anchor="w").pack(fill="x", pady=(6, 0))
         self.e_skip = ctk.CTkEntry(ci2, font=FONT_MONO, height=28)
         self.e_skip.pack(fill="x", pady=(0, 6))
-        Tooltip(self.e_skip, "w3i — настройки карты (слоты, игроки), misc — константы.\nЭти таблицы НЕ переносят (ломают карту).")
+        Tooltip(self.e_skip, "w3i — настройки карты (слоты, игроки), misc — константы.\n"
+                             "Эти таблицы НЕ переносят (ломают карту).\n"
+                             "Внимание: этапы добирают пропуск через поле «Таблицы»\n"
+                             "(не перечислено — не переносится); этот список\n"
+                             "— справочный, в --plan.")
         # 21.10 (аудит): повторный перенос по умолчанию не трогает уже
         # существующие секции. Галочка включает синхронизацию полей.
         self.v_tupd = tk.BooleanVar(value=False)
@@ -1027,7 +1044,8 @@ class App(ctk.CTk):
         self.e_deploy.pack(side="left", padx=6)
         Tooltip(self.e_deploy, "Имя записи каталога приёмника, куда пишется код\n"
                 "(папка на диске = имя записи 1:1, как 213-FW).\n"
-                "Меняй только для переноса в другую запись!")
+                "Меняй только для переноса в другую запись!\n"
+                "Пустое поле НЕ сбрасывает — останется прежнее имя.")
         # 20.10: раскладка папок триггеров (редактор не умеет вложенность)
         ctk.CTkLabel(gi2, text="Раскладка папок триггеров:", font=FONT_SMALL,
                      anchor="w").pack(fill="x", pady=(8, 0))
@@ -1078,6 +1096,9 @@ class App(ctk.CTk):
                              font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
         c5.pack(anchor="w", pady=(4, 0))
         Tooltip(c5, "Генерирует 90-TestSpawn.j: создаёт перенесённых героев для проверки.")
+        # 22.10 (аудит): алиас — чекбокс этапа TestSpawn и галочка здесь
+        # одна переменная (двойное врато устранено, как у геометрии)
+        self.stage_vars['testspawn'] = self.v_ts
         ctk.CTkLabel(gi2, text="Герои TestSpawn (пусто = все из deps):",
                      font=FONT_SMALL, anchor="w").pack(fill="x", pady=(4, 0))
         self.e_ts = ctk.CTkEntry(gi2, font=FONT_MONO, height=28)
@@ -1182,8 +1203,10 @@ class App(ctk.CTk):
         # 22.10 (рефактор A): вторая строка — боевые команды и донорные
         # под-операции («Перенос триггеров», TestSpawn), они берут донора
         # из поля «Карта-донор» и потому живут на вкладке Перенос
-        btns2 = ctk.CTkFrame(tab_t, fg_color="transparent")
-        btns2.pack(fill="x", padx=10, pady=(0, 4))
+        # 22.10 (аудит): дубль ctkaframe btns2 (ниже, ~1215) был мёртвым
+        # виджетом — кнопки паковались в первый, помечен на вынос 23.10
+        # btns2 = ctk.CTkFrame(tab_t, fg_color="transparent")
+        # btns2.pack(fill="x", padx=10, pady=(0, 4))
         self.b_manifest = ab_svc('Отчёты и прочее', "Манифест", self._manifest,
            "Отчёт о переносе в mdlog/transfer/ (что перенесено, конфликты ID).")
         self.b_verify = ab_svc('Проверка и чистка', "Верификация", self._verify_only,
@@ -1299,8 +1322,9 @@ class App(ctk.CTk):
     def _hist(self, key):
         """22.10 (UI): история путей из конфига (gui.path_history)."""
         hh = self.cfg.setdefault('gui', {}).setdefault('path_history', {})
-        v = hh.get(key)
-        return list(v) if isinstance(v, list) else []
+        # 22.10 (аудит): пустые строки в истории — мусор от старых конфигов
+        v = [x for x in hh.get(key) or [] if str(x).strip()]
+        return v if v else []
 
     def _bind_cfg_path(self, entry, section, key):
         """22.10: live-синхронизация поля пути подокна с конфигом.
@@ -1345,7 +1369,7 @@ class App(ctk.CTk):
             return
         hh = self.cfg.setdefault('gui', {}).setdefault('path_history', {})
         hist = [v for v in (hh.get(key) or [])
-                if os.path.normcase(v) != os.path.normcase(value)]
+                if str(v).strip() and os.path.normcase(v) != os.path.normcase(value)]
         hist.insert(0, value)
         hh[key] = hist[:10]
         try:
@@ -1813,7 +1837,10 @@ class App(ctk.CTk):
             cfg.setdefault('safety', {})['stage_timeout_min'] = \
                 max(0.0, float(self.e_tmo.get().replace(',', '.') or 15))
         except ValueError:
-            pass
+            # 22.10 (аудит): нечисловой ввод сохранял СТАРОЕ значение
+            # молча — поле выглядело изменённым, конфиг был прежним
+            self._log('лимит этапа: «%s» не число, в конфиге прежнее '
+                      'значение' % self.e_tmo.get(), 'warn')
         # 21.10: секции import/code больше не расходятся с галочками этапов
         cfg['import']['enabled'] = bool(self.stage_vars['import'].get())
         cfg['code']['enabled'] = bool(self.stage_vars['code'].get())
@@ -1874,8 +1901,9 @@ class App(ctk.CTk):
             self.folders_seg.get() == 'Папки как у донора' else 'flat'
         # 21.09: null-конверт битых gg_unit — конфиг↔UI вместе
         cfg.setdefault('code', {})['null_broken_gguits'] = self.v_ggnul.get()
-        cfg.setdefault('gui', {})[
-            'sounds'] = bool(self.v_sounds.get())  # 22.10: sound_on_done слит с sounds
+        # 22.10 (аудит): sounds писался ниже дважды — один раз убран;
+        # устаревший sound_on_done из старых конфигов вычищается
+        cfg.get('gui', {}).pop('sound_on_done', None)
         # 22.10: toast и звуки событий — конфиг↔UI вместе
         cfg.setdefault('gui', {})['toast'] = bool(self.v_toast.get())
         cfg.setdefault('gui', {})['sounds'] = bool(self.v_sounds.get())
@@ -1889,6 +1917,14 @@ class App(ctk.CTk):
         se = cfg.setdefault('stage_enabled', {})
         for s in STAGES:
             se[s] = self.stage_vars[s].get()
+        # 22.10 (аудит): вручную правленный в конфиге профиль не виден
+        # GUI — этапы базового набора, не попавшие в чекбоксы, могли
+        # молча не запускаться. Предупреждаем.
+        _prof = cfg.get('profile', 'custom')
+        if _prof and _prof != 'custom':
+            self._log('профиль «%s» задан в конфиге вручную: галочки этапов '
+                      'включили его набор — неожиданные этапы пропускаются'
+                      % _prof, 'warn')
         # 22.10: пути Обслуживания — пустое поле убирает ключ из конфига
         # (этапы берут дефолт рядом с конфигом)
         _prow = [[('cleanup', 'log_dir'), self.e_clog],
@@ -2054,7 +2090,20 @@ class App(ctk.CTk):
         # скидывались к зашитым дефолтам при каждом запуске GUI
         se = self.cfg.get('stage_enabled') or {}
         for s in STAGES:
-            self.stage_vars[s].set(bool(se.get(s, s not in ('geometry', 'testspawn'))))
+            # 22.10 (аудит): при отсутствии stage_enabled для гейтов
+            # geometry/testspawn откатываемся к их enabled-ключам, а не
+            # к жёсткому False (иначе осознанно включённый в конфиге
+            # testspawn молча отключался при каждом открытии GUI)
+            if s not in se:
+                if s == 'geometry':
+                    dflt = bool(self.cfg.get('geometry', {}).get('enabled', False))
+                elif s == 'testspawn':
+                    dflt = bool(self.cfg.get('testspawn', {}).get('enabled', False))
+                else:
+                    dflt = True
+                self.stage_vars[s].set(dflt)
+            else:
+                self.stage_vars[s].set(bool(se[s]))
         self._refresh_progress()
 
     def _cfg_path(self):
@@ -2268,6 +2317,19 @@ class App(ctk.CTk):
             cmds = [[sys.executable, '-u', os.path.join(HERE, 'transfer_run.py')] + a for a in args]
             desc = ' -> '.join(' '.join(a) for a in args)
         else:
+            # 22.10 (аудит): тихий non-op — кнопка одиночного этапа
+            # (--stage geometry/testspawn/code_cut...) при выключенной
+            # галочке этапа отрабатывала с кодом 0 БЕЗ работы. Теперь
+            # галочка включается автоматически + заметка в журнал.
+            try:
+                si = args.index('--stage')
+                st = args[si + 1]
+                if self.stage_vars[st].get() is False:
+                    self.stage_vars[st].set(True)
+                    self._log('>>> ВНИМАНИЕ: этап «%s» был выключен галочкой — '
+                              'включил автоматически для одиночного запуска' % st, 'warn')
+            except (ValueError, KeyError):
+                pass
             cmds = [[sys.executable, '-u', os.path.join(HERE, 'transfer_run.py')] + args]
             desc = ' '.join(args)
         # 19.09 (вечер): service-команды (обслуживание) не фильтруются
