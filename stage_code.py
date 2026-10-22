@@ -156,9 +156,14 @@ def main():
                 # триггер или заметка пользователя. Раньше его молча
                 # выбрасывали — терялись «текстовые триггеры» донора.
                 # Корневой code.txt — текстовый спутник code.j (шапка),
-                # его не переносим.
-                if (f[:-4] + '.lml') not in fs and not trig_skipped(os.path.join(root, f)):
-                    orphan_txts.append(os.path.join(root, f))
+                # его не переносим. Если есть sibling .j — .txt это его
+                # спутник: файл переносим, но запись каталога остаётся
+                # ТЛЬКО у .j (иначе в каталоге дубль значения — найдено
+                # 22.10 на 05-H4 / 6-CrvDragNatsy).
+                if ((f[:-4] + '.lml') not in fs
+                        and not trig_skipped(os.path.join(root, f))):
+                    orphan_txts.append((os.path.join(root, f),
+                                        (f[:-4] + '.j') in fs))
 
     b_hits = []   # B-литералы (нужен контекст)
     plain_hits = {}
@@ -403,8 +408,8 @@ def main():
             for v in vals:
                 ext_vals[v] = ext_vals.get(v, 0) + 1
         own_vals = set()
-        for p_extra in list(files) + [lp for lp, _t in gui_pairs] \
-                + list(orphan_txts):
+        for p_extra in (list(files) + [lp for lp, _t in gui_pairs]
+                        + [tp for tp, _hj in orphan_txts if not _hj]):
             if p_extra.endswith('.j'):
                 d_names = os.path.splitext(os.path.basename(_dst(p_extra)))[0]
             elif p_extra.endswith('.lml'):
@@ -423,13 +428,29 @@ def main():
         if cnf:
             rp = (cfg['code'].get('func_prefix', '').strip() or deploy_to)
             rp = re.sub(r'[^A-Za-z0-9_]', '', rp) or 'XFER'
+            # 22.10: чтобы лог не «переоткрывал» решённый конфликт в
+            # каждом прогоне, впервые-переименованные отделяем: если
+            # наша ПОСЛЕДНЯЯ секция уже писала значение '<rp>_<v>',
+            # это повторная перекатка (имена стабильны от прогона к
+            # прогону), ничего менять не нужно, только пересобрать.
+            prev_renamed = set()
+            for sec2 in prev_secs:
+                prev_renamed.update(rec_vals.get(sec2, []))
+            fresh = sorted(v for v in cnf if rp + '_' + v not in prev_renamed)
             for v in cnf:
                 nv = rp + '_' + v
                 trig_rename[v] = nv
                 trig_ident_map['InitTrig_' + v] = 'InitTrig_' + nv
                 trig_ident_map['gg_trg_' + v] = 'gg_trg_' + nv
-            print('конфликтов имён триггеров: %d — переименовано: %s'
-                  % (len(cnf), ', '.join(sorted(trig_rename.values())[:8])))
+            if fresh:
+                print('конфликтов имён триггеров: %d — переименовано: %s'
+                      % (len(cnf),
+                         ', '.join(sorted(rp + '_' + v
+                                          for v in fresh)[:8])))
+            else:
+                print('конфликтов имён триггеров: %d — уже переката '
+                      '(имена стабильны: %s...)' % (len(cnf),
+                     ', '.join(sorted(trig_rename.values())[:3])))
         trig_sub = None
         if trig_ident_map:
             _t_names = sorted(trig_ident_map, key=len, reverse=True)
@@ -599,16 +620,19 @@ def main():
     # 22.10: осиротевшие .txt — текстовые триггеры/заметки донора.
     # Пишем тем же механизмом, что и GUI-пары; в built_rels запоминаем
     # свои пути, чтобы builder каталога сделал из них записи (обычные
-    # .txt в каталог не попадают как спутники .lml).
+    # .txt в каталог не попадают как спутники .lml). 22.10 (фикс): если
+    # у .txt есть sibling .j — это спутник кодовой записи: файл копируем,
+    # а запись каталога остаётся одна (у .j), иначе дубль значения.
     built_rels = set()
     n_orph = 0
-    for txt_p in orphan_txts:
+    for txt_p, has_j in orphan_txts:
         d = os.path.join(tgt, _dst_txt(txt_p))
         os.makedirs(os.path.dirname(d), exist_ok=True)
         io.open(d, 'wb').write(io.open(txt_p, 'rb').read())
         rel_d = os.path.relpath(d, tgt).replace(os.sep, '/')
         written.append(rel_d)
-        built_rels.add(rel_d)
+        if not has_j:
+            built_rels.add(rel_d)
         n_orph += 1
     if n_orph:
         print('текстовых триггеров (.txt без .lml) перенесено:', n_orph)

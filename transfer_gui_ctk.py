@@ -82,7 +82,9 @@ DEFAULT_CFG = {
     'stage_enabled': {'mapping': True, 'registry': True, 'deps': True, 'tables': True,
                       'import': True, 'code': True, 'code_cut': True, 'geometry': False,
                       'testspawn': False, 'verify': True, 'globals': True},
-    'gui': {'sound_on_done': True, 'autolog': True, 'log_font': 9, 'theme': 'dark'},
+    # 22.10: toast и звуки событий — по умолчанию включены
+    'gui': {'sound_on_done': True, 'autolog': True, 'log_font': 9, 'theme': 'dark',
+            'toast': True, 'sounds': True},
 }
 
 STAGES = ['mapping', 'registry', 'deps', 'tables', 'import', 'code', 'code_cut', 'globals', 'geometry', 'testspawn', 'verify']
@@ -355,7 +357,7 @@ class App(ctk.CTk):
         for i, tabname in enumerate(('Перенос', 'Обслуживание', 'Геометрия', 'Журнал'), 1):
             self.bind_all('<Control-Key-%d>' % i,
                           lambda e, t=tabname: self._goto_tab(t))
-        self.bind_all('<Control-s>', lambda e: self._save_cfg())
+        self.bind_all('<Control-s>', lambda e: self._save_cfg_user())
 
     # ---------- построение UI ----------
 
@@ -834,6 +836,20 @@ class App(ctk.CTk):
                              font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
         c6.pack(anchor="w", padx=12, pady=2)
         Tooltip(c6, "Системный звук, когда прогон завершён (удобно для фоновых прогонов).")
+        # 22.10: события для toast и звуков (галочки там же, в «Опциях»)
+        self.v_toast = tk.BooleanVar(value=True)
+        c8 = ctk.CTkCheckBox(left, text="Всплывающие уведомления (toast)", variable=self.v_toast,
+                             font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        c8.pack(anchor="w", padx=12, pady=2)
+        Tooltip(c8, "Компактные уведомления в углу окна: этап упал, прон завершён,\n"
+                    "конфиг сохранён. Само исчезает за несколько секунд,\n"
+                    "закрывается кликом.")
+        self.v_sounds = tk.BooleanVar(value=True)
+        c9 = ctk.CTkCheckBox(left, text="Звуки событий", variable=self.v_sounds,
+                             font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
+        c9.pack(anchor="w", padx=12, pady=2)
+        Tooltip(c9, "Системные звуки Windows: упал этап, прогон завершён.\n"
+                    "Хранится в конфиге: gui.sounds.")
         self.v_autolog = tk.BooleanVar(value=False)
         c7 = ctk.CTkCheckBox(left, text="Авто-открыть лог после прогона", variable=self.v_autolog,
                              font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
@@ -1123,7 +1139,7 @@ class App(ctk.CTk):
                 Tooltip(b, hint_text)
             return b
 
-        ab(btns, "Сохранить конфиг", self._save_cfg,
+        ab(btns, "Сохранить конфиг", self._save_cfg_user,
            "Записать все настройки в transfer_config.json")
         self.b_plan = ab(btns, "План", lambda: self._run(['--plan']),
            "Показать что будет делать прогон (без изменений).")
@@ -1295,8 +1311,9 @@ class App(ctk.CTk):
                 elif key in c:
                     c.pop(key, None)
                     self._save_cfg()
-            except Exception:
-                pass
+            except Exception as e:
+                # 22.10: раньше проглатывалось молча — правки пути терялись
+                self._log('правка пути не сохранена: %s' % e, 'err')
         self._path_save_job = None
 
         def _sched(event=None):
@@ -1325,8 +1342,10 @@ class App(ctk.CTk):
         hh[key] = hist[:10]
         try:
             self._save_cfg()
-        except Exception:
-            pass
+        except Exception as e:
+            # 22.10: история путей важна молча не бывает — сбой сохранения
+            # показываем (сам _save_cfg тоже логирует)
+            self._log('история путей не сохранена: %s' % e, 'err')
 
     def _add_hist(self, entry, key):
         """22.10 (UI): кнопка ▾ рядом с полем — выпадающий список последних
@@ -1472,7 +1491,11 @@ class App(ctk.CTk):
     def _open_log(self):
         p = self._log_path()
         if os.path.exists(p):
-            os.startfile(p)
+            try:
+                os.startfile(p)
+            except Exception as e:
+                # 22.10: сбой startfile под pythonw умирал молча
+                self._log('не удалось открыть журнал: %s' % e, 'err')
         else:
             messagebox.showinfo('Журнал', 'Журнала пока нет — запусти прогон.')
 
@@ -1482,7 +1505,10 @@ class App(ctk.CTk):
         d = os.path.join(os.path.dirname(self._cfg_path()), 'logs')
         fs = sorted(_g.glob(os.path.join(d, 'transfer-manifest-*.md')))
         if fs:
-            os.startfile(fs[-1])
+            try:
+                os.startfile(fs[-1])
+            except Exception as e:
+                self._log('не удалось открыть манифест: %s' % e, 'err')
         else:
             messagebox.showinfo('Манифест', 'Манифестов пока нет — запусти перенос.')
 
@@ -1502,6 +1528,127 @@ class App(ctk.CTk):
         # в режиме Обслуживание они НЕ показываются в журнале
         self.q.put((msg, tag, scope))
 
+    # ---------- 22.10: toast-уведомления и звуки событий ----------
+
+    def _toast(self, text, kind='info'):
+        """Компактное уведомление в правом НИЖНЕМ углу главного окна
+        (не перекрывает шапку и прогресс вверху). Само исчезает через
+        несколько секунд, закрывается кликом. Несколько подряд тостов
+        складываются стеком вверх. kind: ok|err|info.
+        Thread-safe: вызывать ТОЛЬКО из главного потока — события из
+        рабочих потоков идут через очередь маркером '__toast__|kind|text'
+        (см. _poll_log, тот же канал, что вывод этапов)."""
+        if not getattr(self, 'v_toast', None) or not self.v_toast.get():
+            return
+        try:
+            text = str(text).strip() or '...'
+            bg = {'ok': OKGREEN, 'err': DANGER, 'info': "#2b2f36"}.get(kind, "#2b2f36")
+            dur = 6.0 if kind == 'err' else 3.5   # ошибки висят дольше
+            win = tk.Toplevel(self)
+            win.withdraw()
+            win.overrideredirect(True)
+            win.attributes('-topmost', True)
+            fr = tk.Frame(win, bg=bg, padx=12, pady=9)
+            fr.pack()
+            lbl = tk.Label(fr, text=text, bg=bg, fg="#ffffff",
+                           wraplength=280, justify="left",
+                           font=("Segoe UI", 10))
+            lbl.pack()
+            win.update_idletasks()
+            w = min(max(win.winfo_reqwidth(), 210), 330)
+            h = win.winfo_reqheight()
+            x = max(0, self.winfo_rootx() + self.winfo_width() - w - 14)
+            # 46 — над строкой статуса/прогресса
+            base_y = max(0, self.winfo_rooty() + self.winfo_height() - h - 46)
+            toasts = getattr(self, '_toasts', None)
+            if toasts is None:
+                toasts = self._toasts = []
+            y = base_y - len(toasts) * (h + 6)
+            win.geometry('%dx%d+%d+%d' % (w, h, x, y))
+            win.deiconify()
+            # закрытие по клику
+            for wdg in (fr, lbl):
+                wdg.bind('<Button-1>', lambda e, wn=win: self._toast_close(wn))
+            win.bind('<Button-1>', lambda e: self._toast_close(win))
+            job = win.after(int(dur * 1000),
+                            lambda wn=win: self._toast_close(wn))
+            toasts.append({'win': win, 'h': h, 'x': x, 'base_y': base_y})
+            self._toast_tracks = getattr(self, '_toast_tracks', {})
+            self._toast_tracks[win] = job
+        except Exception:
+            pass   # сбой тоста не должен трогать mainloop
+
+    def _toast_close(self, win, job=None):
+        if job is None:
+            job = getattr(self, '_toast_tracks', {}).get(win)
+        if win in getattr(self, '_toast_tracks', {}):
+            try:
+                win.after_cancel(self._toast_tracks[win])
+            except Exception:
+                pass
+            self._toast_tracks.pop(win, None)
+        try:
+            win.destroy()
+        except Exception:
+            pass
+        if win in [t['win'] for t in getattr(self, '_toasts', [])]:
+            self._toasts = [t for t in self._toasts if t['win'] is not win]
+            self._toast_restagger()
+
+    def _toast_restagger(self):
+        """Позади закрывшегося тоста сдвигаем стек вниз на его место."""
+        toasts = getattr(self, '_toasts', [])
+        if not toasts:
+            return
+        off = 0
+        for t in toasts:
+            try:
+                yy = t['base_y'] - off
+                t['win'].geometry('+%d+%d' % (t['x'], yy))
+                off += t['h'] + 6
+            except Exception:
+                pass
+
+    def _play_sound(self, kind):
+        """Системные звуки Windows без .wav-файлов (MessageBeep — системный
+        звук, играется асинхронно, mainloop не блокирует). kind: ok|err|info.
+        info не озвучивается (нейтральные тосты тихие)."""
+        if not getattr(self, 'v_sounds', None) or not self.v_sounds.get():
+            return
+        try:
+            import winsound
+            mb = {'ok': winsound.MB_ICONASTERISK,
+                  'err': winsound.MB_ICONHAND}.get(kind)
+            if mb is not None:
+                winsound.MessageBeep(mb)
+        except Exception as e:
+            self._log('звук недоступен: %s' % e, 'warn')
+
+    def _save_cfg_user(self):
+        """22.10: ЯВНОЕ сохранение (Ctrl+S / кнопка «Сохранить конфиг») —
+        с уведомлением. Фоновые _save_cfg (старт прогона, поля путей)
+        тостом не спамят: сбой виден в журнале и тостом ошибки."""
+        try:
+            self._save_cfg()
+            self._toast('Настройки сохранены', 'info')
+        except Exception as e:
+            self._log('Сохранение конфига не удалось: %s' % e, 'err')
+            self._toast('Сохранение не удалось: %s' % e, 'err')
+
+    def report_callback_exception(self, exc, val, tb):
+        """22.10: НИКАКИХ молчаливых смертей коллбэков tkinter. Прежде
+        исключение в GUI-команде уходило в stderr под pythonw (его нет),
+        и кнопка «молча» ничего не делала. Теперь сбой попадает в журнал
+        и в красный тост."""
+        import traceback
+        try:
+            self._log('ОШИБКА GUI: %s' %
+                      ''.join(traceback.format_exception(exc, val, tb))[:600],
+                      'err')
+            self._toast('Ошибка интерфейса: %s' % val, 'err')
+        except Exception:
+            pass
+
     def _poll_log(self):
         while not self.q.empty():
             item = self.q.get()
@@ -1512,6 +1659,18 @@ class App(ctk.CTk):
             else:
                 msg, tag = item
                 scope = None
+            # 22.10: toast-события из рабочих потоков через ту же очередь
+            # (tkinter из потока трогать нельзя) — маркер __toast__|kind|text
+            if msg.startswith('__toast__|'):
+                try:
+                    _, kind, text = msg.split('|', 2)
+                except ValueError:
+                    kind, text = 'info', msg
+                self._toast(text, kind)
+                if kind == 'err':
+                    self._run_failed = True
+                    self._play_sound('err')
+                continue
             if msg == '__refresh__':
                 # 20.10 (аудит): чипы прогресса — после каждого этапа
                 self._refresh_progress()
@@ -1526,12 +1685,16 @@ class App(ctk.CTk):
                 self.pct_lbl.configure(text='100%')
                 self.after(2500, lambda: (self.pbar.set(0), self.pct_lbl.configure(text='')))
                 self._refresh_progress()
-                if self.v_sound.get():
-                    try:
-                        import winsound
-                        winsound.MessageBeep(winsound.MB_OK)
-                    except Exception:
-                        pass
+                # 22.10: итог прогона — зелёный тост + звук успеха, если
+                # ни один этап не упал; звук только у ПОЛНЫХ прогонов
+                # (--all/--dry-run/--loop/--stage), одиночные команды
+                # (--status/--reset/...) не озвучиваются и не тостят
+                run_ok = not getattr(self, '_run_failed', False)
+                self._run_failed = False
+                if run_ok and getattr(self, '_full_run', False):
+                    self._toast('Прогон завершён успешно', 'ok')
+                    if self.v_sound.get():
+                        self._play_sound('ok')
                 if self.v_autolog.get():
                     try:
                         self._open_log()
@@ -1702,6 +1865,9 @@ class App(ctk.CTk):
         # 21.09: null-конверт битых gg_unit — конфиг↔UI вместе
         cfg.setdefault('code', {})['null_broken_gguits'] = self.v_ggnul.get()
         cfg.setdefault('gui', {})['sound_on_done'] = self.v_sound.get()
+        # 22.10: toast и звуки событий — конфиг↔UI вместе
+        cfg.setdefault('gui', {})['toast'] = bool(self.v_toast.get())
+        cfg.setdefault('gui', {})['sounds'] = bool(self.v_sounds.get())
         cfg['gui']['autolog'] = self.v_autolog.get()
         cfg['gui']['log_font'] = self.log_size
         cfg['gui']['theme'] = APPEARANCE
@@ -1732,7 +1898,15 @@ class App(ctk.CTk):
 
     def _save_cfg(self):
         self._collect_cfg()
-        io.open(CFG, 'wb').write(json.dumps(self.cfg, indent=2, ensure_ascii=False).encode('utf-8'))
+        try:
+            io.open(CFG, 'wb').write(json.dumps(self.cfg, indent=2,
+                                                ensure_ascii=False).encode('utf-8'))
+        except Exception as e:
+            # 22.10: раньше сбой записи молча ронял вызов (под pythonw без
+            # консоли — «кнопка не работает»). Теперь пользователь видит.
+            self._log('НЕ УДАЛОСЬ записать конфиг: %s' % e, 'err')
+            self._toast('Не удалось записать конфиг: %s' % e, 'err')
+            raise
         # 19.09 (вечер): убран _log — «конфиг сохранён» замусоривал
         # журнал при каждом действии (5+ раз за прогон)
 
@@ -1745,7 +1919,14 @@ class App(ctk.CTk):
             io.open(CFG, 'wb').write(json.dumps(self.cfg, indent=2,
                                                 ensure_ascii=False).encode('utf-8'))
             self._log('создан конфиг по умолчанию: ' + CFG, 'ok')
-        self.cfg = json.load(io.open(CFG, 'rb'))
+        try:
+            self.cfg = json.load(io.open(CFG, 'rb'))
+        except Exception as e:
+            # 22.10: битый JSON раньше умирал молча под pythonw. Теперь —
+            # дефолтный каркас + сигнал в журнал.
+            self.cfg = json.loads(json.dumps(DEFAULT_CFG))
+            self._log('Конфиг не читается (%s) — работа на значениях по умолчанию. '
+                      'Правь файл или перенеси его в архив: %s' % (e, CFG), 'err')
         self.e_src.delete(0, 'end'); self.e_src.insert(0, self.cfg.get('source', ''))
         self.e_tgt.delete(0, 'end'); self.e_tgt.insert(0, self.cfg.get('target', ''))
         self.e_name.delete(0, 'end'); self.e_name.insert(0, self.cfg.get('name', ''))
@@ -1818,6 +1999,9 @@ class App(ctk.CTk):
                 e.insert(0, self.cfg.get(sec, {}).get(key, ''))
         g = self.cfg.get('gui', {})
         self.v_sound.set(g.get('sound_on_done', False))
+        # 22.10: toast/звуки — восстановление из конфига (по умолчанию ВКЛ)
+        self.v_toast.set(bool(g.get('toast', True)))
+        self.v_sounds.set(bool(g.get('sounds', True)))
         self.v_autolog.set(g.get('autolog', False))
         self.log_size = g.get('log_font', 9)
         self.log.configure(font=('Consolas', self.log_size))
@@ -1883,7 +2067,12 @@ class App(ctk.CTk):
             messagebox.showwarning('Занято', 'Прогон уже выполняется — дождись завершения.')
             return
         self._collect_cfg()
-        io.open(CFG, 'wb').write(json.dumps(self.cfg, indent=2, ensure_ascii=False).encode('utf-8'))
+        try:
+            io.open(CFG, 'wb').write(json.dumps(self.cfg, indent=2, ensure_ascii=False).encode('utf-8'))
+        except Exception as e:
+            self._log('Прогон не стартовал: конфиг не записан: %s' % e, 'err')
+            self._toast('Прогон не стартовал: конфиг не записан', 'err')
+            return
         cmd = [sys.executable, '-u', os.path.join(HERE, 'stage_verify.py'), CFG]
         # 19.09: в режиме Обслуживания — без маппинга
         # (маппинг от чужого переноса даёт ложные
@@ -1892,6 +2081,8 @@ class App(ctk.CTk):
             cmd.append('--no-map')
         self._log('>>> Верификация приёмника (без переноса)', 'ok')
         self.running = True
+        self._full_run = False
+        self._run_failed = False
         self.status.configure(text='верификация...')
         threading.Thread(target=self._worker, args=(cmd,), daemon=True).start()
 
@@ -1928,8 +2119,9 @@ class App(ctk.CTk):
                 try:
                     io.open(CFG, 'wb').write(json.dumps(self.cfg, indent=2,
                                                         ensure_ascii=False).encode('utf-8'))
-                except Exception:
-                    pass
+                except Exception as e:
+                    # 22.10: было молча — сбой в конце прогона не виден
+                    self.q.put(('конфиг не записан (only_dirs): %s' % e, 'err', None))
             self._proc = None
             self.q.put(('__done__', None, None))
 
@@ -1963,6 +2155,12 @@ class App(ctk.CTk):
             self._proc = None
             self.q.put(('--- код выхода: %d ---' % proc.returncode,
                         'ok' if proc.returncode == 0 else 'err', scope))
+            # 22.10: этап упал — красный тост + звук ошибки (маркер через
+            # очередь: tkinter из рабочего потока не трогаем). Служит и для
+            # verify: stage_verify при ошибках выходит не с нулём.
+            if proc.returncode != 0:
+                self.q.put(('__toast__|err|Этап упал с кодом %d — детали в журнале'
+                            % proc.returncode, 'err', None))
             # 20.10 (аудит): чипы прогресса обновляются после КАЖДОГО этапа,
             # не только в конце прогона
             self.q.put(('__refresh__', None, None))
@@ -1975,7 +2173,14 @@ class App(ctk.CTk):
             messagebox.showwarning('Занято', 'Прогон уже выполняется — дождись завершения.')
             return
         self._collect_cfg()
-        io.open(CFG, 'wb').write(json.dumps(self.cfg, indent=2, ensure_ascii=False).encode('utf-8'))
+        try:
+            io.open(CFG, 'wb').write(json.dumps(self.cfg, indent=2, ensure_ascii=False).encode('utf-8'))
+        except Exception as e:
+            # 22.10: старт прогона на несохранённом конфиге — без сигнала
+            # под pythonw выглядел как «нажал и ничего не происходит»
+            self._log('Прогон не стартовал: конфиг не записан: %s' % e, 'err')
+            self._toast('Прогон не стартовал: конфиг не записан', 'err')
+            return
         if args and isinstance(args[0], list):
             cmds = [[sys.executable, '-u', os.path.join(HERE, 'transfer_run.py')] + a for a in args]
             desc = ' -> '.join(' '.join(a) for a in args)
@@ -1993,6 +2198,12 @@ class App(ctk.CTk):
             if svc in flat:
                 scope = None
                 break
+        # 22.10: полный ли это прогон (зелёный тост и звук в конце) —
+        # одиночные команды вроде --status не тостят «успех»
+        self._full_run = any(k in desc for k in
+                             ('--all', '--dry-run', '--loop', '--stage',
+                              '--remap', '--plan'))
+        self._run_failed = False
         # 20.10 (аудит): новый прогон — чистый журнал (старые сессии
         # не наслаиваются в окне; на диске история остаётся)
         self.log.delete('1.0', 'end')
