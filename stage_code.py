@@ -361,10 +361,93 @@ def main():
             return os.path.join('trigger', folder, base + '.txt')
         return os.path.join('trigger', entry_name, folder + ' ' + base + '.txt')
 
+    # 22.10: конфликты имён триггеров донора со значениями каталога
+    # приёмника (донор InitTrig_CE4, приёмник тоже владеет CE4 →
+    # редактор генерит второй InitTrig_CE4 = коллизия). Раньше это
+    # молчало (B-литералы переименовывались, имена триггеров нет).
+    FOREIGN = set()   # 22.10: инициализация раньше _dst/_dst_gui (был NameError)
+    # Разрешение: значение нашей записи переименовываем в
+    # '<префикс>_<значение>', а ссылки донора InitTrig_/gg_trg_ на
+    # старое имя переименовываем в коде. Наш ПРОШЛЫЙ деплой не считаем
+    # конфликтом — его записи будут переписаны тем же прогоном.
+    def _disp_of(x):
+        m = re.search(r'\s\d+-', x)
+        return x[m.end():] if m else (x.split('-', 1)[-1] if '-' in x else x)
+
+    trig_rename = {}      # старое значение -> новое (с префиксом)
+    trig_ident_map = {}   # InitTrig_CE4 -> InitTrig_LIA_CE4 (+ gg_trg_)
+    old_m0 = deploy_manifest.load_manifest(cfgp)
+    prev_secs = {deploy_to, entry_name}
+    if old_m0 and old_m0.get('catalog_entries'):
+        prev_secs.update(str(e) for e in old_m0['catalog_entries'])
+    cat_p1 = os.path.join(tgt, 'trigger', 'catalog.lml')
+    if os.path.exists(cat_p1):
+        cur_sec = None
+        rec_vals = {}     # секция -> [значения детей]
+        for ln in io.open(cat_p1, 'rb').read().decode('utf-8', 'replace').splitlines():
+            if not ln.strip():
+                continue
+            ind = len(ln) - len(ln.lstrip(' '))
+            mm = re.match(r"^'?(.*?)'?\s*:\s*(.*?)$", ln.strip())
+            if not mm:
+                continue
+            if ind == 0:
+                cur_sec = mm.group(1)
+                rec_vals.setdefault(cur_sec, [])
+            elif cur_sec is not None:
+                rec_vals[cur_sec].append(mm.group(2).strip().strip("'"))
+        ext_vals = {}
+        for sec, vals in rec_vals.items():
+            if sec in prev_secs:
+                continue   # наш предыдущий деплой — перепишется сам
+            for v in vals:
+                ext_vals[v] = ext_vals.get(v, 0) + 1
+        own_vals = set()
+        for p_extra in list(files) + [lp for lp, _t in gui_pairs] \
+                + list(orphan_txts):
+            if p_extra.endswith('.j'):
+                d_names = os.path.splitext(os.path.basename(_dst(p_extra)))[0]
+            elif p_extra.endswith('.lml'):
+                d_names = os.path.splitext(os.path.basename(_dst_gui(p_extra)))[0]
+            else:
+                d_names = os.path.splitext(os.path.basename(_dst_txt(p_extra)))[0]
+            if d_names != 'war3map':   # безвредный технический файл
+                own_vals.add(_disp_of(d_names))
+        # 22.10: коллизия = наше значение УЖЕ существует у приёмника
+        # (даже однократно — InitTrig_<значение> сгенерится дважды).
+        # Переименовываем только валидные JASS-имена: dash-«заметки»
+        # типа '-----' редактор сам делает уникальными, не трогаем.
+        cnf = sorted(
+            v for v in own_vals if v in ext_vals
+            and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*', v))
+        if cnf:
+            rp = (cfg['code'].get('func_prefix', '').strip() or deploy_to)
+            rp = re.sub(r'[^A-Za-z0-9_]', '', rp) or 'XFER'
+            for v in cnf:
+                nv = rp + '_' + v
+                trig_rename[v] = nv
+                trig_ident_map['InitTrig_' + v] = 'InitTrig_' + nv
+                trig_ident_map['gg_trg_' + v] = 'gg_trg_' + nv
+            print('конфликтов имён триггеров: %d — переименовано: %s'
+                  % (len(cnf), ', '.join(sorted(trig_rename.values())[:8])))
+        trig_sub = None
+        if trig_ident_map:
+            _t_names = sorted(trig_ident_map, key=len, reverse=True)
+            _t_re = re.compile(r'\b(?:' + '|'.join(
+                re.escape(n) for n in _t_names) + r')\b')
+
+            def trig_sub(text, _re=_t_re):
+                return _re.sub(lambda m2: trig_ident_map[m2.group(0)], text)
+        else:
+            trig_sub = None
+
     # 20.10 (фикс дым-теста): FOREIGN определяем ЗАРАНЕЕ — _dst/_dst_gui
     # ссылаются на него, а folder_keys прогоняет _dst по всем файлам.
     # Ниже только МУТИРУЕМ (.add), не перепривязываем.
-    FOREIGN = set()
+    # 22.10: инициализация выше (перед блоком конфликтов) — здесь была
+    # первая привязка, из-за неё _dst падал NameError при раннем вызове;
+    # мутируем папки приёмника ниже по коду.
+
 
     # 20.10: ключи каталога нового прогона (папки деплоя) — для keep_e
     def _folder_keys():
@@ -443,6 +526,9 @@ def main():
         # на каждое имя (десятки млн regex-операций — до рефактора).
         if prefix_sub is not None:
             s2 = prefix_sub(s2)
+        # 22.10: переименование InitTrig_/gg_trg_ конфликтных триггеров
+        if trig_sub is not None:
+            s2 = trig_sub(s2)
         # 20.09: файлы донора без литералов/префикса тоже переносим
         # (копия как есть), иначе чистые триггеры молча терялись.
         # 20.09 fix №6: было `if s2 != s or True:` — выродившийся фикс
@@ -539,6 +625,9 @@ def main():
         # 22.10: тот же один предкомпилированный проход
         if prefix_sub is not None:
             hs2 = prefix_sub(hs2)
+        # 22.10: переименование InitTrig_/gg_trg_ конфликтных — и в шапке
+        if trig_sub is not None:
+            hs2 = trig_sub(hs2)
         # 21.09: null-конверт и в шапке (code.j донора тоже ссылается на юнитов)
         if cfg['code'].get('null_broken_gguits', True) and map_units is not None:
             def _gg_null_h(m):
@@ -749,7 +838,10 @@ def main():
                     for stem, fkey in groups[sec]:
                         # 20.09 fix №10: значение = ИМЯ ТРИГГЕРА (после номера),
                         # InitTrig_<значение> линкуется с кодом
-                        out.append(kv(stem, disp_of(stem), '    '))
+                        # 22.10: конфликтное значение — с префиксом,
+                        # линковка донорского кода wera переименована
+                        v0 = disp_of(stem)
+                        out.append(kv(stem, trig_rename.get(v0, v0), '    '))
                         # 21.09 фикс C: флаги донора под записью (8-индент)
                         for fl in donor_flags.get(fkey, []):
                             out.append('        ' + fl)
@@ -759,6 +851,33 @@ def main():
                 for sec_key in {deploy_to, entry_name} | set(groups):
                     pat = re.compile(r"^'?" + re.escape(sec_key) + r"'?:[^\n]*\n(?:(?:    [^\n]*)\n)*", re.M)
                     cat = pat.sub('', cat, count=1)
+                # 22.10: конфликты имён триггеров — отчёт, БЕЗ молчаливой
+                # правки чужого каталога. Считаем после purge наших секций,
+                # чтобы не ловить самих себя. Редактор генерит на каждую
+                # запись каталога глобал InitTrig_<значение> и gg_trg_<значение>:
+                # (а) родной дубль значений в приёмнике = коллизия глобалов;
+                # (б) наша запись с тем же значением, что осталась в
+                # каталоге приёмника — та же коллизия.
+                ext_vals = {}
+                for mv in re.finditer(r"^( {2,})('?)(.*?)\2\s*:\s*(.*?)\s*$",
+                                      cat, re.M):
+                    v = mv.group(4).strip().strip("'")
+                    if v:
+                        ext_vals[v] = ext_vals.get(v, 0) + 1
+                dups = sorted(v for v, c in ext_vals.items() if c > 1)
+                if dups:
+                    print('ВНИМАНИЕ: дубли значений в каталоге приёмника '
+                          '(InitTrig_<имя> коллизируют, родной каталог): '
+                          '%d (%s%s)' % (len(dups),
+                                         ', '.join(repr(d) for d in dups[:5]),
+                                         ' ...' if len(dups) > 5 else ''))
+                own_vals = {trig_rename.get(disp_of(stem), disp_of(stem))
+                            for sec in groups for stem, _f in groups[sec]}
+                hits = sorted(v for v in own_vals if v in ext_vals)
+                if hits:
+                    print('ВНИМАНИЕ: наши записи совпадают по значению с '
+                          'записями приёмника (InitTrig_<имя>): %s'
+                          % ', '.join(repr(h) for h in hits[:8]))
                 cat2 = cat.rstrip() + chr(10) + chr(10).join(t for _, t in secs)
                 io.open(cat_p, 'wb').write(cat2.encode('utf-8'))
                 cat_added.extend(sec for sec, _ in secs)
