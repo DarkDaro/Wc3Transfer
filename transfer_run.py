@@ -129,7 +129,10 @@ def target_files(cfg, stage):
         out = []
         for root, dirs, files in os.walk(os.path.join(t, 'trigger')):
             for f in files:
-                if f.endswith('.j') or f == 'catalog.lml':
+                # 22.10: снапшот полнее — code пишет и GUI-пары .lml,
+                # и осиротевшие .txt (текстовые триггеры); раньше их
+                # откат не покрывал
+                if f.endswith(('.j', '.lml', '.txt')):
                     out.append(os.path.join(root, f))
         return out
     if stage == 'geometry':

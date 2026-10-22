@@ -83,7 +83,7 @@ DEFAULT_CFG = {
                       'import': True, 'code': True, 'code_cut': True, 'geometry': False,
                       'testspawn': False, 'verify': True, 'globals': True},
     # 22.10: toast и звуки событий — по умолчанию включены
-    'gui': {'sound_on_done': True, 'autolog': True, 'log_font': 9, 'theme': 'dark',
+    'gui': {'autolog': True, 'log_font': 9, 'theme': 'dark',
             'toast': True, 'sounds': True},
 }
 
@@ -831,11 +831,8 @@ class App(ctk.CTk):
                              font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
         c2.pack(anchor="w", padx=12, pady=2)
         Tooltip(c2, "Останавливает прогон на первом ошибочном этапе.\nОткат: кнопка «Откат» (снапшоты).")
-        self.v_sound = tk.BooleanVar(value=False)
-        c6 = ctk.CTkCheckBox(left, text="Звук по завершении", variable=self.v_sound,
-                             font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
-        c6.pack(anchor="w", padx=12, pady=2)
-        Tooltip(c6, "Системный звук, когда прогон завершён (удобно для фоновых прогонов).")
+        # 22.10: старую галочку «Звук по завершении» (v_sound/play gui.sound_on_done)
+        # слили с «Звуками событий» — один переключатель звука, меньше путаницы
         # 22.10: события для toast и звуков (галочки там же, в «Опциях»)
         self.v_toast = tk.BooleanVar(value=True)
         c8 = ctk.CTkCheckBox(left, text="Всплывающие уведомления (toast)", variable=self.v_toast,
@@ -1704,7 +1701,9 @@ class App(ctk.CTk):
                 self._run_failed = False
                 if run_ok and getattr(self, '_full_run', False):
                     self._toast('Прогон завершён успешно', 'ok')
-                    if self.v_sound.get():
+                # 22.10: звук = общая галочка «Звуки событий» (v_sounds),
+                # бывшая «Звук по завершении» слита в неё
+                if getattr(self, 'v_sounds', None) and self.v_sounds.get():
                         self._play_sound('ok')
                 if self.v_autolog.get():
                     try:
@@ -1875,7 +1874,8 @@ class App(ctk.CTk):
             self.folders_seg.get() == 'Папки как у донора' else 'flat'
         # 21.09: null-конверт битых gg_unit — конфиг↔UI вместе
         cfg.setdefault('code', {})['null_broken_gguits'] = self.v_ggnul.get()
-        cfg.setdefault('gui', {})['sound_on_done'] = self.v_sound.get()
+        cfg.setdefault('gui', {})[
+            'sounds'] = bool(self.v_sounds.get())  # 22.10: sound_on_done слит с sounds
         # 22.10: toast и звуки событий — конфиг↔UI вместе
         cfg.setdefault('gui', {})['toast'] = bool(self.v_toast.get())
         cfg.setdefault('gui', {})['sounds'] = bool(self.v_sounds.get())
@@ -2009,10 +2009,11 @@ class App(ctk.CTk):
                 e.delete(0, 'end')
                 e.insert(0, self.cfg.get(sec, {}).get(key, ''))
         g = self.cfg.get('gui', {})
-        self.v_sound.set(g.get('sound_on_done', False))
-        # 22.10: toast/звуки — восстановление из конфига (по умолчанию ВКЛ)
+        # 22.10: миграция — если звук был включён старым флагом
+        # sound_on_done, а новый sounds ещё не писан, не теряем его
         self.v_toast.set(bool(g.get('toast', True)))
-        self.v_sounds.set(bool(g.get('sounds', True)))
+        self.v_sounds.set(bool(g.get('sounds', g.get('sound_on_done', True))))
+        # 22.10: toast/звуки — восстановление из конфига (по умолчанию ВКЛ)
         self.v_autolog.set(g.get('autolog', False))
         self.log_size = g.get('log_font', 9)
         self.log.configure(font=('Consolas', self.log_size))
