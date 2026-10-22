@@ -195,6 +195,45 @@ def main():
                 donor_funcs.add(m.group(1))
         print('префикс функций:', prefix, '| функций донора:', len(donor_funcs),
               '| InitTrig_* пропущено')
+    # 22.10: префиксация одним проходом. Прежний цикл («4 regexa на каждое
+    # из ~12 тыс. имён на каждый из ~2 тыс. файлов») давал десятки млн
+    # regex-операций и был корневой причиной медленного stage_code.
+    # Один проход по идентификаторам: имя в множестве (O(1)) + контекст
+    # (function X / call X( / executeFunc X( / ExecuteFunc("X") / X(
+    # и пробелные варианты). Перебор альтернатив из 10+ тыс. имён тоже
+    # оказался медленным на больших файлах, поэтому именно множество.
+    prefix_sub = None
+    if prefix and donor_funcs:
+        _ctx_re = re.compile(
+            r'(?:\bfunction\s+'
+            r'|\b(?:call|(?i:executefunc))\s*\(\s*'
+            r'|(?i:executefunc\s*\(\s*")'
+            r')$')
+
+        _ident_re = re.compile(r'\b[A-Za-z_][A-Za-z0-9_]*\b')
+
+        def prefix_sub(text):
+            out = []
+            last = 0
+            for m in _ident_re.finditer(text):
+                nm = m.group(0)
+                if nm not in donor_funcs:
+                    continue
+                start, end = m.span()
+                # контекст: объявление function X, вызов call/executeFunc
+                # X( (в т.ч. с пробелами), строковый ExecuteFunc("X"),
+                # голый вызов X( (lineahead \s*\()
+                before = text[max(0, start - 220):start]
+                after = text[end:end + 4]
+                if (_ctx_re.search(before)
+                        or re.match(r'\s*\(', after)):
+                    out.append(text[last:start])
+                    out.append(prefix)
+                    last = start
+            out.append(text[last:])
+            return ''.join(out)
+
+
 
     for p in files:
         s = io.open(p, 'rb').read().decode('utf-8', errors='replace')
@@ -378,15 +417,10 @@ def main():
         s2 = lit_sub[0].sub(lit_sub[1], s) if lit_sub else s
         # 18.09 (v5): префикс функций — объявления и вызовы.
         # Только имена функций донора, не нативы/константы.
-        if prefix and donor_funcs:
-            for fn in donor_funcs:
-                s2 = re.sub(r'\bfunction\s+' + fn + r'\b', 'function ' + prefix + fn, s2)
-                s2 = re.sub(r'\b(call|executeFunc|ExecuteFunc)\s*\(\s*' + fn + r'\b', r'\1 ' + prefix + fn, s2)
-                # 20.09 fix №5: строковые вызовы ExecuteFunc("Имя") —
-                # в доноре JAR106e есть (5-Damage Engine.j), без этого
-                # вызов улетал бы в несуществующую функцию после префиксации
-                s2 = re.sub(r'(?i)(executefunc\s*\(\s*")' + fn + r'(")', r'\g<1>' + prefix + fn + r'\g<2>', s2)
-                s2 = re.sub(r'\b' + fn + r'\s*\(', prefix + fn + '(', s2)
+        # 22.10: один предкомпилированный проход вместо 4 замены
+        # на каждое имя (десятки млн regex-операций — до рефактора).
+        if prefix_sub is not None:
+            s2 = prefix_sub(s2)
         # 20.09: файлы донора без литералов/префикса тоже переносим
         # (копия как есть), иначе чистые триггеры молча терялись.
         # 20.09 fix №6: было `if s2 != s or True:` — выродившийся фикс
@@ -438,6 +472,12 @@ def main():
     for lml_p, txt_p in gui_pairs:
         # 20.10: раскладка общим правилом _dst_gui (flat/folders)
         d = os.path.join(tgt, _dst_gui(lml_p))
+        # 22.10: ГЛАВНАЯ ПРАВКА (корень «триггеры не записались»):
+        # папка приёмника могла не существовать (новая папка донора,
+        # folders-режим) — open падал с FileNotFoundError, этап рушился
+        # ПОСЛЕ копирования .j, но ДО записи каталога и манифеста,
+        # и в журнале это выглядело как «триггеры частично перенеслись».
+        os.makedirs(os.path.dirname(d), exist_ok=True)
         io.open(d, 'wb').write(io.open(lml_p, 'rb').read())
         written.append(os.path.relpath(d, tgt).replace(os.sep, '/'))
         n_gui += 1
@@ -456,13 +496,9 @@ def main():
         hs = io.open(header_src, 'rb').read().decode('utf-8', errors='replace')
         hs2 = lit_sub[0].sub(lit_sub[1], hs) if lit_sub else hs
         # 18.09 (v5-fix): префикс функций и в шапке тоже
-        if prefix and donor_funcs:
-            for fn in donor_funcs:
-                hs2 = re.sub(r'\bfunction\s+' + fn + r'\b', 'function ' + prefix + fn, hs2)
-                hs2 = re.sub(r'\b(call|executeFunc|ExecuteFunc)\s*\(\s*' + fn + r'\b', r'\1 ' + prefix + fn, hs2)
-                # 20.09 fix №5: строковые вызовы ExecuteFunc("Имя")
-                hs2 = re.sub(r'(?i)(executefunc\s*\(\s*")' + fn + r'(")', r'\g<1>' + prefix + fn + r'\g<2>', hs2)
-                hs2 = re.sub(r'\b' + fn + r'\s*\(', prefix + fn + '(', hs2)
+        # 22.10: тот же один предкомпилированный проход
+        if prefix_sub is not None:
+            hs2 = prefix_sub(hs2)
         # 21.09: null-конверт и в шапке (code.j донора тоже ссылается на юнитов)
         if cfg['code'].get('null_broken_gguits', True) and map_units is not None:
             def _gg_null_h(m):
