@@ -938,6 +938,17 @@ class App(ctk.CTk):
                                 "вычёркивается из графа, exclude_triggers\n"
                                 "пропускает триггеры/папки донора при переносе кода.\n"
                                 "Пусто = <имя конфига>_set.json рядом с конфигом.")
+        # 22.10: пресет-сборер — вписал ID героев в «Корни deps», кнопка
+        # считает замыкание (stage_deps) и собирает transfer_config_set.json
+        self.b_selbuild = ctk.CTkButton(ri, text="Собрать набор из корней deps",
+                                        height=28, font=FONT_SMALL,
+                                        command=self._build_selection)
+        self.b_selbuild.pack(fill="x", pady=(6, 6))
+        Tooltip(self.b_selbuild, "stage_deps считает замыкание от ID в поле\n"
+                                 "«Корни deps» и записывает набор (на глаз):\n"
+                                 "include с типами (unit:X, ability:Y...),\n"
+                                 "замыкание по abilList/heroAbilList/buffList.\n"
+                                 "Существующие exclude_* сохраняются.")
 
         # 4. Таблицы
         cf2, ci2 = self._card(right, "4. Таблицы")
@@ -2101,6 +2112,77 @@ class App(ctk.CTk):
             self._log('>>> Манифест: код %d' % code, 'ok' if code == 0 else 'err')
 
         self._bg(work, done)
+
+    # 22.10: пресет-сборер — считать замыкание deps от «Корни deps» и
+    # записать transfer_config_set.json (include с типами; существующие
+    # exclude_* сохраняются). Работает как обычный фоновый инструмент,
+    # thread-safe: поток только в очередь, тосты разбирает _poll_log.
+    def _set_path(self):
+        fp = (self.cfg.get('selection', {}) or {}).get('file', '')
+        if fp:
+            return fp if os.path.isabs(fp) else os.path.join(HERE, fp)
+        import transfer_set
+        return transfer_set.path_for(CFG)
+
+    def _build_selection(self):
+        roots = [x.strip() for x in self.e_roots.get().split(',') if x.strip()]
+        if not roots:
+            self._log('сборер: впишите ID героев/объектов в «Корни deps»', 'warn')
+            self._toast('сборер: поле «Корни deps» пустое', 'err')
+            return
+        if self.running:
+            self._log('сборер: пайплайн уже работает', 'err')
+            return
+        self._save_cfg()
+        cmd = [sys.executable, os.path.join(HERE, 'stage_deps.py'), CFG]
+        self._log('>>> сборер: считаю замыкание deps (%s)' % ', '.join(roots), 'ok')
+
+        def work():
+            return self._run_streamed(cmd)
+
+        def done(res):
+            code = res[0] if isinstance(res, tuple) else 1
+            if code != 0:
+                self._log('сборер: deps упал (код %d) — набор не записан' % code, 'err')
+                self._toast('сборер: deps упал, набор не записан', 'err')
+                return
+            try:
+                self._selection_write()
+            except Exception as e:
+                self._log('сборер: набор не записан: %s' % e, 'err')
+                self._toast('сборер: набор не записан: %s' % e, 'err')
+
+        self._bg(work, done)
+
+    def _selection_write(self):
+        import transfer_set
+        sp = self._set_path()
+        old = {}
+        if os.path.exists(sp):
+            try:
+                old = json.load(io.open(sp, encoding='utf-8'))
+            except Exception as e:
+                self._log('сборер: набор не прочитан (%s) — перезаписан' % e, 'warn')
+        dp = os.path.join(HERE, 'deps_result.json')
+        deps = json.load(io.open(dp, encoding='utf-8'))
+        objs = deps.get('objects', {})
+        inc = []
+        for t, ids in sorted(objs.items()):
+            for iid in sorted(ids):
+                inc.append(t + ':' + iid)
+        prev_inc = {str(x).strip() for x in old.get('include', []) if str(x).strip()}
+        merged = sorted(set(inc) | prev_inc)
+        data = {
+            'include': merged,
+            'exclude_objects': [str(x) for x in old.get('exclude_objects', [])],
+            'exclude_triggers': [str(x) for x in old.get('exclude_triggers', [])],
+        }
+        io.open(sp, 'w', encoding='utf-8').write(
+            json.dumps(data, ensure_ascii=False, indent=1))
+        n = sum(len(v) for v in objs.values())
+        self._log('сборер: %s записан — замыкание %d объектов, include %d '
+                  '(исключения сохранены)' % (os.path.basename(sp), n, len(merged)), 'ok')
+        self._toast('сборер: %d объектов -> %s' % (n, os.path.basename(sp)), 'ok')
 
     def _worker(self, cmd, scope=None):
         try:
