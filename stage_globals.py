@@ -220,6 +220,16 @@ def main():
     if vl_sync:
         vl_dst = vl_parse(io.open(vl_p, 'rb').read().decode('utf-8', errors='replace'))
         vl_src = vl_parse(io.open(vl_src_p, 'rb').read().decode('utf-8', errors='replace'))
+        # 22.10: одно имя с другим типом или array флагом донора
+        # молча пропускалось (n in vl_dst) и редактор тихо использовал
+        # чужой тип. Теперь такой конфликт виден в отчёте.
+        for n, (t, a) in vl_src.items():
+            if n in vl_dst:
+                t2, a2 = vl_dst[n]
+                if t2 != t or bool(a) != bool(a2):
+                    print('ВНИМАНИЕ variable.lml: %s тип донора %s%s vs приёмника %s%s'
+                          % (n, t, ' array(%d)' % a if a else '',
+                             t2, ' array(%d)' % a2 if a2 else ''))
         vl_add = [(n, t, a) for n, (t, a) in vl_src.items() if n not in vl_dst]
         if dry:
             print('variable.lml: не хватает %d из донора (dry-run, не пишу)' % len(vl_add))
