@@ -180,6 +180,22 @@ def main():
                 break
     for t, ids in sorted(by_t.items()):
         print('  %s: %d' % (t, len(ids)))
+    # 22.10 (docrутка): молчаливые сценарии deps — корни, НЕ найденные
+    # ни в одной таблице донора (стандартные объекты или опечатки,
+    # e2e-замер 22.10: 'ability:AHtc' тише исчезал из отчёта), и
+    # exclude на объект, которого в замыкании нет. Оба печатаются.
+    unknown = sorted(r2 for r2 in roots
+                     if not any(r2 in tables[t] for t in tables))
+    if unknown:
+        print('ВНИМАНИЕ: корней не найдено в таблицах донора '
+              '(стандартные или опечатки — перенос не изменится): %d (%s)'
+              % (len(unknown), ', '.join(unknown[:10])))
+    idle_excl = sorted(e for e in excl_objs
+                       if e not in keep and e not in roots)
+    if idle_excl:
+        print('перенос-набор: exclude на объект, которого нет в '
+              'замыкании (ничего не вычеркнуто): %s'
+              % ', '.join(idle_excl[:10]))
     print('АССЕТОВ (иконки/модели):', len(assets))
     if missing_assets:
         print('НЕ НАЙДЕНЫ в источнике:', len(missing_assets))
@@ -195,8 +211,12 @@ def main():
             try:
                 prev = json.load(io.open(outp, 'rb'))
                 prev_auto = prev.get('auto_added', {})
-            except Exception:
-                pass
+            except Exception as _e:
+                # 22.10: раньше молча теряли auto_added — битый/занятый
+                # deps_result.json незаметно менял результат deps
+                print('ВНИМАНИЕ: deps_result.json не прочитан (%s) — '
+                      'прошлый auto_added не учтён, файл будет перезаписан'
+                      % _e)
         merged = {t: ids for t, ids in by_t.items()}
         for t2, ids2 in prev_auto.items():
             lst = merged.setdefault(t2, [])
