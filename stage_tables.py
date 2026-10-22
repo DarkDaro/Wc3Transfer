@@ -160,6 +160,16 @@ def main():
         t, old = k.split(':', 1)
         if old != new:
             ref_map[old] = new
+    # 22.10: ремап ссылок только для id, СУЩЕСТВУЮЩИХ в доноре.
+    # Записи маппинга для стандартных id (AHtc -> A9K0 и т.п.) соседних
+    # прогонов превращали корректные ссылки приёмника в несуществующие
+    # id (70 «БИТАЯ ССЫЛКА» verify).
+    donor_ids = set()
+    for t in cfg['tables']:
+        sp2 = os.path.join(src, 'table', t + '.ini')
+        secs2, _ = parse_sections_raw(sp2)
+        donor_ids.update(secs2.keys())
+    ref_map = {o: n for o, n in ref_map.items() if o in donor_ids}
 
     # 20.10: переименованные при импорте ассеты и поля replace_std
     renames = {}

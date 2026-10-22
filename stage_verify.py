@@ -103,6 +103,15 @@ def main():
         tp = os.path.join(tgt, 'table', t + '.ini')
         secs = parse_sections(tp)
         miss = [new for k, new in mp.items() if k.startswith(t + ':') and new not in secs]
+        # 22.10: устаревшие записи маппинга дают ложные «нет секций»:
+        # в доноре соответствующую секцию давно удалили (чистка), её
+        # отсутствие в приёмнике — не ошибка. Фильтр по секциям донора.
+        spa = os.path.join(cfg.get('source', ''), 'table', t + '.ini')
+        if mp and miss and os.path.exists(spa):
+            dsec = parse_sections(spa)
+            miss = [new for k, new in mp.items()
+                    if k.startswith(t + ':')
+                    and k.split(':', 1)[1] in dsec and new not in secs]
         if miss:
             print('ОШИБКА %s: нет секций в приёмнике: %s' % (t, miss[:10]))
             errs += len(miss)
