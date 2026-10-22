@@ -1,7 +1,7 @@
 {
   "_comment": "Конфиг переноса объектов между lni-картами. Заполнить под пару карт, затем: python transfer_run.py --plan",
   "source": "C:/AgentLetta/BVO3.2",
-  "target": "C:/AgentLetta/LOWSTOBVO",
+  "target": "C:/AgentLetta/BVOLKEK",
   "name": "LOWSBVO",
   "tables": [
     "unit",
@@ -55,12 +55,12 @@
       "dy": 0.0,
       "ufs_range": 4000.0
     },
-    "deploy_to": "LIA",
+    "deploy_to": "BVO",
     "include_monolith": true,
     "allow_b": true,
     "only_dirs": [],
     "header_mode": "append",
-    "func_prefix": "LIA",
+    "func_prefix": "BVO",
     "update_catalog": true,
     "null_broken_gguits": true
   },
@@ -130,14 +130,19 @@
     "sound_on_done": true,
     "autolog": true,
     "log_font": 9,
-    "geometry": "1851x1057+26+26",
+    "geometry": "1851x990+26+26",
     "theme": "dark",
     "path_history": {
       "j": [
         "",
         ""
+      ],
+      "map": [
+        "C:/AgentLetta/BVOLKEK"
       ]
-    }
+    },
+    "sounds": true,
+    "toast": true
   },
   "cleanup": {
     "last_dir": "C:/AgentLetta/LOWSTOBVO",
