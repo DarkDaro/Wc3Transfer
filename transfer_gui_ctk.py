@@ -644,6 +644,24 @@ class App(ctk.CTk):
         Tooltip(c4z, "z берётся из карты приёмника на месте вставки.\n"
                      "Выключи, чтобы сохранить z донора (декор повиснет,\n"
                      "если рельеф различается).")
+        # 22.10: разделение категорий — настраивается независимо
+        tr_cat = ctk.CTkFrame(gi1, fg_color="transparent")
+        tr_cat.pack(fill="x", pady=(6, 0))
+        ctk.CTkLabel(tr_cat, text="Что переносить:", font=FONT_SMALL).pack(side="left")
+        self.v_decor = tk.BooleanVar(value=True)
+        c4d = ctk.CTkCheckBox(tr_cat, text="Декорации (war3map.doo)",
+                              variable=self.v_decor, font=FONT_SMALL,
+                              checkbox_width=18, checkbox_height=18)
+        c4d.pack(side="left", padx=(8, 12))
+        Tooltip(c4d, "Деревья, камни и прочие doodad/destructable\n"
+                     "из war3map.doo донора.")
+        self.v_units = tk.BooleanVar(value=True)
+        c4u = ctk.CTkCheckBox(tr_cat, text="Юниты (war3mapUnits.doo)",
+                              variable=self.v_units, font=FONT_SMALL,
+                              checkbox_width=18, checkbox_height=18)
+        c4u.pack(side="left", padx=4)
+        Tooltip(c4u, "Юниты донора из war3mapUnits.doo\n"
+                     "(стартовые локации sloc пропускаются).")
         gfr = ctk.CTkFrame(gi1, fg_color="transparent")
         gfr.pack(fill="x", pady=(6, 0))
         ctk.CTkLabel(gfr, text="Сдвиг координат offset:", font=FONT_SMALL).pack(side="left")
@@ -926,8 +944,11 @@ class App(ctk.CTk):
         self.e_tsrect.pack(fill="x", pady=(0, 6))
         Tooltip(self.e_tsrect, "center или пусто — спавн в центре карты (0, 0).\nИначе — имя региона (gg_rct_team_1_spawn).")
 
-        # 7. Пути и лимиты (22.10): ключи, которые CLI-этапы берут из конфига
-        pf7, pi7 = self._card(right, "7. Пути и лимиты (Обслуживание)")
+        # 22.10 (перенос): карточка «Пути и лимиты» живёт на вкладке
+        # Обслуживание (svc_scroll создан выше, карточка ляжет после
+        # групп кнопок): каталоги журналов/бэкапов — настройки именно
+        # сервисных операций
+        pf7, pi7 = self._card(svc_scroll, "Пути и лимиты (Обслуживание)")
         pf7.pack(fill="x", pady=4)
         ctk.CTkLabel(pi7, text="Пусто = путь по умолчанию (logs/ и transfer_backup/ у конфига).",
                      font=FONT_SMALL, anchor="w").pack(fill="x")
@@ -1135,6 +1156,40 @@ class App(ctk.CTk):
         hh = self.cfg.setdefault('gui', {}).setdefault('path_history', {})
         v = hh.get(key)
         return list(v) if isinstance(v, list) else []
+
+    def _bind_cfg_path(self, entry, section, key):
+        """22.10: live-синхронизация поля пути подокна с конфигом.
+        Фокус уводится / клавиша отпущена / поле стёрто: значение сразу
+        в конфиг; пустое поле УДАЛЯЕТ ключ (операция возьмёт дефолт).
+        Запись с задержкой (debounce), чтобы не перезаписывать файл
+        на каждом нажатии клавиши."""
+        def _apply():
+            try:
+                v = entry.get().strip()
+                c = self.cfg.setdefault(section, {})
+                if v:
+                    if c.get(key) != v:
+                        c[key] = v
+                        self._save_cfg()
+                elif key in c:
+                    c.pop(key, None)
+                    self._save_cfg()
+            except Exception:
+                pass
+        self._path_save_job = None
+
+        def _sched(event=None):
+            if self._path_save_job is not None:
+                try:
+                    self.after_cancel(self._path_save_job)
+                except Exception:
+                    pass
+            self._path_save_job = self.after(600, _apply)
+        entry.bind('<FocusOut>', lambda event=None: _apply())   # уход из поля: сразу
+        entry.bind('<KeyRelease>', lambda event=None: _sched()) # набор: с задержкой
+        # 22.10: ссылка на обработчик: прямая проверка семантики в тестах
+        entry._cfg_path_apply = _apply
+        return _apply
 
     def _remember_path(self, key, value):
         """22.10 (UI): запомнить путь в историю (до 10, свежие сверху).
@@ -1451,6 +1506,13 @@ class App(ctk.CTk):
         cfg['geometry']['offset'] = [dx, dy] if (dx or dy) else None
         # 22.10: пересчёт высоты по рельефу приёмника (конфиг↔UI вместе)
         cfg['geometry']['recount_z'] = self.v_recz.get()
+        # 22.10: разделение категорий (декор/юниты); обе галочки = секция
+        # types не пишем — этап переносит оба типа как раньше
+        if self.v_decor.get() and self.v_units.get():
+            cfg['geometry'].pop('types', None)
+        else:
+            cfg['geometry']['types'] = {'decor': self.v_decor.get(),
+                                        'units': self.v_units.get()}
         cfg['testspawn']['enabled'] = self.v_ts.get()
         cfg['testspawn']['heroes'] = [t.strip() for t in self.e_ts.get().split(',') if t.strip()]
         # 22.09: точка спавна — 'center' (0,0) или имя региона; конфиг↔UI вместе
@@ -1536,6 +1598,10 @@ class App(ctk.CTk):
         self.e_dy.delete(0, 'end'); self.e_dy.insert(0, str(off[1]))
         # 22.10: пересчёт высоты — восстановление из конфига
         self.v_recz.set(self.cfg.get('geometry', {}).get('recount_z', True))
+        # 22.10: категории — восстановление (нет секции = оба типа)
+        _gt = self.cfg.get('geometry', {}).get('types', {})
+        self.v_decor.set(bool(_gt.get('decor', True)))
+        self.v_units.set(bool(_gt.get('units', True)))
         self.v_ts.set(self.cfg.get('testspawn', {}).get('enabled', False))
         self.e_ts.delete(0, 'end'); self.e_ts.insert(0, ', '.join(self.cfg.get('testspawn', {}).get('heroes', [])))
         # 22.09: точка спавна — восстановление из конфига
@@ -1805,6 +1871,10 @@ class App(ctk.CTk):
         Tooltip(e_dir, 'Папка карты в lni-формате (trigger/ + catalog.lml).')
         ctk.CTkButton(row, text='...', width=36, height=30,
                       command=lambda: self._cleanup_pick(e_dir)).pack(side='left')
+        # 22.10 (конф-синх): история и живой путь в конфиг (единый вид
+        # с окном «Чистка карты»: тот же ключ cleanup.last_dir)
+        self._add_hist(e_dir, 'map')
+        self._bind_cfg_path(e_dir, 'cleanup', 'last_dir')
 
         opts, oi = self._card(win, 'Что чистим')
         opts.pack(fill='x', padx=8, pady=4)
@@ -2323,6 +2393,8 @@ class App(ctk.CTk):
                       command=lambda: self._cleanup_pick(e_dir)).pack(side='left')
         # 22.10 (UI): история путей карты рядом с полем
         self._add_hist(e_dir, 'map')
+        # 22.10 (конф-синх): путь живёт в конфиге и при стирании поля
+        self._bind_cfg_path(e_dir, 'cleanup', 'last_dir')
 
         opts, oi = self._card(win, 'Что чистим')
         opts.pack(fill='x', padx=8, pady=4)
@@ -2691,6 +2763,8 @@ class App(ctk.CTk):
                       command=lambda: self._deob_pick(e_file)).pack(side='left')
         # 22.10 (UI): история файлов .j рядом с полем
         self._add_hist(e_file, 'j')
+        # 22.10 (конф-синх): путь живёт в конфиге и при стирании поля
+        self._bind_cfg_path(e_file, 'deob', 'last_path')
 
         info, ii = self._card(win, 'Отчёт')
         info.pack(fill='x', padx=8, pady=4)
@@ -2721,6 +2795,10 @@ class App(ctk.CTk):
             entry.delete(0, 'end'); entry.insert(0, p)
             # 22.10 (UI): файл попадает в историю
             self._remember_path('j', p)
+            # 22.10 (конф-синх): выбор файла сразу в конфиг (не только
+            # после СКАНа как раньше)
+            self.cfg.setdefault('deob', {})['last_path'] = p
+            self._save_cfg()
 
     def _deob_run(self, src, out_dir):
         """Прогон deob.py: src -> out_dir/<имя>_deobfuscated.j + rename_map.csv.
@@ -2835,17 +2913,23 @@ class App(ctk.CTk):
                       command=lambda: self._rawconv_pick(e_dir)).pack(side='left')
         # 22.10 (UI): история путей карты рядом с полем
         self._add_hist(e_dir, 'map')
+        # 22.10 (конф-синх): путь живёт в конфиге и при стирании поля
+        self._bind_cfg_path(e_dir, 'rawconv', 'last_path')
 
         # 29.09: направление конверта — туда/обратно
         dirc, dirci = self._card(win, 'Направление')
         dirc.pack(fill='x', padx=8, pady=4)
         v_dir = ctk.StringVar(value=self.cfg.get('rawconv', {}).get('last_dir', 'to'))
+        # 22.10 (конф-синх): радиокнопка со сменой направления сразу в конфиг
+        def _dir_save(_v=None):
+            self.cfg.setdefault('rawconv', {})['last_dir'] = v_dir.get()
+            self._save_cfg()
         for val, txt, tip in (
             ('to', 'туда (деобфускация)', "'Amrf' <- 0x/dec/$ (читаемый вид)"),
             ('from', 'обратно (обфускация)', "'Amrf' -> 0x/dec/$ (скрытый вид)"),
         ):
             rb = ctk.CTkRadioButton(dirci, text=txt, variable=v_dir, value=val,
-                                    font=FONT_SMALL)
+                                    font=FONT_SMALL, command=_dir_save)
             rb.pack(side='left', padx=(6, 10))
             Tooltip(rb, tip)
 
@@ -2853,13 +2937,17 @@ class App(ctk.CTk):
         tofc, tofci = self._card(win, 'Целевая форма (обратно)')
         tofc.pack(fill='x', padx=8, pady=4)
         v_to = ctk.StringVar(value=self.cfg.get('rawconv', {}).get('last_to', 'hex'))
+        # 22.10 (конф-синх): целевая форма сразу в конфиг
+        def _to_save(_v=None):
+            self.cfg.setdefault('rawconv', {})['last_to'] = v_to.get()
+            self._save_cfg()
         for val, txt, tip in (
             ('hex', '0x...', "'Amrf' -> 0x416D7266"),
             ('dec', 'dec', "'Amrf' -> 1097691750 (десятичное число)"),
             ('jhex', '$...', "'Amrf' -> $416D7266 ($-hex JASS)"),
         ):
             rb = ctk.CTkRadioButton(tofci, text=txt, variable=v_to, value=val,
-                                    font=FONT_SMALL)
+                                    font=FONT_SMALL, command=_to_save)
             rb.pack(side='left', padx=(6, 10))
             Tooltip(rb, tip)
 
@@ -2874,6 +2962,10 @@ class App(ctk.CTk):
         if _rm not in ('both', 'hex', 'dec', 'jhex'):
             _rm = 'both'
         v_mode = ctk.StringVar(value=_rm)
+        # 22.10 (конф-синх): режим сразу в конфиг (базовый, без rawc_)
+        def _mode_save(_v=None):
+            self.cfg.setdefault('rawconv', {})['last_mode'] = v_mode.get()
+            self._save_cfg()
         for val, txt, tip in (
             ('both', 'оба', 'hex-литералы (0x416D7266) и десятичные (1097691750).\nСначала hex, потом dec.'),
             ('hex', 'hex', "только 0xXXXXXXXX -> 'RAWC'"),
@@ -2881,7 +2973,7 @@ class App(ctk.CTk):
             ('jhex', '$hex', "только $-литералы JASS (все длины):\n$D000F -> 851983, $A -> 10, $96 -> 150,\n$416D7266 -> 'Amrf' (если байты печатаемые).\nСемантика не меняется."),
         ):
             rb = ctk.CTkRadioButton(rmi, text=txt, variable=v_mode, value=val,
-                                    font=FONT_SMALL)
+                                    font=FONT_SMALL, command=_mode_save)
             rb.pack(side='left', padx=(6, 10))
             Tooltip(rb, tip)
 

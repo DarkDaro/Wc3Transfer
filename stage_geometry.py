@@ -1,6 +1,8 @@
 # 17.09: Этап geometry — вставка декора/юнитов в doo+units приёмника
 # Логика из ufs_insert_doo_units.py, параметризованная через конфиг.
-# Вход: cfg['geometry'] = {enabled, offset: [dx, dy] или null, recount_z}
+# Вход: cfg['geometry'] = {enabled, offset: [dx, dy] или null, recount_z,
+#       22.10: types = {decor: True, units: True} — что переносить;
+#       отсутствующая секция = переносятся оба (старое поведение)}
 # offset null = авто-подбор по воде (как в UFS->LoW) — требует подтверждения.
 # Маппинг: transfer_mapping.json
 # Dry-run: только отчёт, файлы не пишутся.
@@ -109,84 +111,94 @@ def main():
     # рельеф приёмника для z
     heights, Mx, My = read_w3e_heights(os.path.join(tgt_map, 'war3map.w3e'))
     recount_z = geo.get('recount_z', True)
+    # 22.10: разделение декора и юнитов. Секция отсутствует/частичная = True:
+    # старые конфиги работают по-прежнему (переносятся оба типа)
+    types = geo.get('types', {})
+    do_decor = bool(types.get('decor', True))
+    do_units = bool(types.get('units', True))
+    if not do_decor and not do_units:
+        print('geometry: обе категории выключены (geometry.types) — этап пропущен')
+        return
 
-    # ===== doo =====
-    sd = os.path.join(src_map, 'war3map.doo')
-    td = os.path.join(tgt_map, 'war3map.doo')
-    if not (os.path.exists(sd) and os.path.exists(td)):
-        print('geometry: нет war3map.doo (%s) — этап пропущен' % ('источник' if not os.path.exists(sd) else 'приёмник'))
-        return
-    s_doo = io.open(sd, 'rb').read()
-    t_doo = io.open(td, 'rb').read()
-    s_recs = parse_doo_records(s_doo)
-    t_recs = parse_doo_records(t_doo)
-    # 20.10: пустой doo приёмника больше не роняет max()
-    max_num = max([r['num'] for r in t_recs] or [0])
-    new_recs = list(t_recs)
-    added = skipped = 0
-    for r in s_recs:
-        nid = mp.get('doodad:' + r['id']) or mp.get('destructable:' + r['id']) or r['id']
-        nx, ny = r['x'] + dx, r['y'] + dy
-        if not (-16384 <= nx <= 16384) or not (-12288 <= ny <= 12288):
-            skipped += 1
-            continue
-        max_num += 1
-        nz = terrain_z(heights, Mx, My, nx, ny) if geo.get('recount_z', True) else r['z']
-        raw = bytearray(r['raw'])
-        struct.pack_into('<f', raw, 16, nz)  # z на +16
-        new_recs.append({'raw': bytes(raw), 'new_id': nid, 'x': nx, 'y': ny, 'num': max_num})
-        added += 1
-    print('doo: было %d, добавится %d, пропущено (вне карты) %d' % (len(t_recs), added, skipped))
-    if dry:
-        print('(dry-run: doo не записан)')
-    else:
-        write_doo(new_recs, os.path.join(tgt_map, 'war3map.doo'))
+    # ===== doo (декорации, war3map.doo) =====
+    if do_decor:
+        sd = os.path.join(src_map, 'war3map.doo')
+        td = os.path.join(tgt_map, 'war3map.doo')
+        if not (os.path.exists(sd) and os.path.exists(td)):
+            print('geometry: нет war3map.doo (%s) — декор пропущен' % ('источник' if not os.path.exists(sd) else 'приёмник'))
+        else:
+            s_doo = io.open(sd, 'rb').read()
+            t_doo = io.open(td, 'rb').read()
+            s_recs = parse_doo_records(s_doo)
+            t_recs = parse_doo_records(t_doo)
+            # 20.10: пустой doo приёмника больше не роняет max()
+            max_num = max([r['num'] for r in t_recs] or [0])
+            new_recs = list(t_recs)
+            added = skipped = 0
+            for r in s_recs:
+                nid = mp.get('doodad:' + r['id']) or mp.get('destructable:' + r['id']) or r['id']
+                nx, ny = r['x'] + dx, r['y'] + dy
+                if not (-16384 <= nx <= 16384) or not (-12288 <= ny <= 12288):
+                    skipped += 1
+                    continue
+                max_num += 1
+                nz = terrain_z(heights, Mx, My, nx, ny) if recount_z else r['z']
+                raw = bytearray(r['raw'])
+                struct.pack_into('<f', raw, 16, nz)  # z на +16
+                new_recs.append({'raw': bytes(raw), 'new_id': nid, 'x': nx, 'y': ny, 'num': max_num})
+                added += 1
+            print('doo: было %d, добавится %d, пропущено (вне карты) %d' % (len(t_recs), added, skipped))
+            if dry:
+                print('(dry-run: doo не записан)')
+            else:
+                write_doo(new_recs, os.path.join(tgt_map, 'war3map.doo'))
 
-    # ===== units =====
-    su = os.path.join(src_map, 'war3mapUnits.doo')
-    tu = os.path.join(tgt_map, 'war3mapUnits.doo')
-    if not (os.path.exists(su) and os.path.exists(tu)):
-        print('geometry: нет war3mapUnits.doo — units пропущены')
-        return
-    s_u = io.open(su, 'rb').read()
-    t_u = io.open(tu, 'rb').read()
-    if len(t_u) < 16 or len(s_u) < 16:
-        print('geometry: war3mapUnits.doo короче заголовка — units пропущены')
-        return
-    t_cnt = int.from_bytes(t_u[12:16], 'little')
-    s_cnt = int.from_bytes(s_u[12:16], 'little')
-    new_units = bytearray(t_u)
-    added_u = skipped_u = 0
-    for i in range(s_cnt):
-        off = 16 + i * 111
-        rec = bytearray(s_u[off:off+111])
-        uid = rec[0:4].decode('ascii', errors='replace')
-        if uid == 'sloc':
-            continue
-        x, y, z = struct.unpack('<3f', bytes(rec[8:20]))
-        nx, ny = x + dx, y + dy
-        if not (-16384 <= nx <= 16384) or not (-12288 <= ny <= 12288):
-            skipped_u += 1
-            continue
-        nid = mp.get('unit:' + uid) or uid
-        rec[0:4] = nid.encode('ascii')
-        struct.pack_into('<f', rec, 8, nx)
-        struct.pack_into('<f', rec, 12, ny)
-        if geo.get('recount_z', True):
-            struct.pack_into('<f', rec, 16, terrain_z(heights, Mx, My, nx, ny))
-        new_units += rec
-        added_u += 1
-    struct.pack_into('<I', new_units, 12, t_cnt + added_u)
-    print('units: было %d, добавится %d, пропущено %d' % (t_cnt, added_u, skipped_u))
-    if dry:
-        print('(dry-run: units не записан)')
-    else:
-        io.open(os.path.join(tgt_map, 'war3mapUnits.doo'), 'wb').write(bytes(new_units))
-        # проверка
-        chk = io.open(os.path.join(tgt_map, 'war3mapUnits.doo'), 'rb').read()
-        exp = 16 + (t_cnt + added_u) * 111
-        assert len(chk) == exp, 'units размер %d != %d' % (len(chk), exp)
-        print('units записан, размер ок:', exp)
+    # ===== units (юниты, war3mapUnits.doo) =====
+    if do_units:
+        su = os.path.join(src_map, 'war3mapUnits.doo')
+        tu = os.path.join(tgt_map, 'war3mapUnits.doo')
+        if not (os.path.exists(su) and os.path.exists(tu)):
+            print('geometry: нет war3mapUnits.doo — units пропущены')
+            return
+        s_u = io.open(su, 'rb').read()
+        t_u = io.open(tu, 'rb').read()
+        if len(t_u) < 16 or len(s_u) < 16:
+            print('geometry: war3mapUnits.doo короче заголовка — units пропущены')
+            return
+        t_cnt = int.from_bytes(t_u[12:16], 'little')
+        s_cnt = int.from_bytes(s_u[12:16], 'little')
+        new_units = bytearray(t_u)
+        added_u = skipped_u = 0
+        for i in range(s_cnt):
+            off = 16 + i * 111
+            rec = bytearray(s_u[off:off+111])
+            uid = rec[0:4].decode('ascii', errors='replace')
+            if uid == 'sloc':
+                continue
+            x, y, z = struct.unpack('<3f', bytes(rec[8:20]))
+            nx, ny = x + dx, y + dy
+            if not (-16384 <= nx <= 16384) or not (-12288 <= ny <= 12288):
+                skipped_u += 1
+                continue
+            nid = mp.get('unit:' + uid) or uid
+            rec[0:4] = nid.encode('ascii')
+            struct.pack_into('<f', rec, 8, nx)
+            struct.pack_into('<f', rec, 12, ny)
+            if recount_z:
+                struct.pack_into('<f', rec, 16, terrain_z(heights, Mx, My, nx, ny))
+            new_units += rec
+            added_u += 1
+        struct.pack_into('<I', new_units, 12, t_cnt + added_u)
+        print('units: было %d, добавится %d, пропущено %d' % (t_cnt, added_u, skipped_u))
+        if dry:
+            print('(dry-run: units не записан)')
+        else:
+            io.open(os.path.join(tgt_map, 'war3mapUnits.doo'), 'wb').write(bytes(new_units))
+            # проверка
+            chk = io.open(os.path.join(tgt_map, 'war3mapUnits.doo'), 'rb').read()
+            exp = 16 + (t_cnt + added_u) * 111
+            assert len(chk) == exp, 'units размер %d != %d' % (len(chk), exp)
+            print('units записан, размер ок:', exp)
 
 if __name__ == '__main__':
     main()
