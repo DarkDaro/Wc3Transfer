@@ -417,7 +417,11 @@ def main():
             else:
                 d_names = os.path.splitext(os.path.basename(_dst_txt(p_extra)))[0]
             if d_names != 'war3map':   # безвредный технический файл
-                own_vals.add(_disp_of(d_names))
+                # 22.10: корневая шапка code.j в собственные значения не
+                # попадает — запись каталога от неё не генерится, и её 'code'
+                # создавал подряд-конфликт на каждом прогоне
+                if os.path.relpath(p_extra, trig_src) != 'code.j':
+                    own_vals.add(_disp_of(d_names))
         # 22.10: коллизия = наше значение УЖЕ существует у приёмника
         # (даже однократно — InitTrig_<значение> сгенерится дважды).
         # Переименовываем только валидные JASS-имена: dash-«заметки»
