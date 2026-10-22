@@ -119,8 +119,49 @@ SHORT = {
     'testspawn': 'Спавн', 'verify': 'Вериф.',
 }
 
+# 22.10: пресеты настроек. Задача: «сразу понятно, что выбирать и какие
+# галочки под какие задачи нажимать». Пресет задаёт этапы, список таблиц
+# и hint по корням deps; ID героев пользователь вписывает сам (они
+# зависят от карты-донора). Применяется к текущим галочкам GUI,
+# Dry-run остаётся как стоит (безопасность не перекрываем).
+# stages: {stage: on} само; не указанные этапы выключаются.
+PRESETS = {
+    'Полный перенос': {
+        'desc': 'Всё: объекты, ассеты, триггеры, глобалы, верификация.\n'
+                'Корни deps пустые (полный перенос всех таблиц).\n'
+                'Геометрия и спавн не включаются (нужно осознанно).',
+        'stages': {'mapping': True, 'registry': True, 'deps': True,
+                   'tables': True, 'import': True, 'code': True,
+                   'globals': True, 'code_cut': False, 'verify': True},
+        'tables': 'unit, ability, buff, item, upgrade, doodad, destructable',
+        'roots': '',
+    },
+    'Только герои и способности': {
+        'desc': 'Юниты-герои, их способности, баффы, дамми и ассеты.\n'
+                'Впишем ID героев донора в поле «Корни deps»\n'
+                '(герои и предметы, через запятую). Таблицы:\n'
+                'unit, ability, buff.',
+        'stages': {'mapping': True, 'registry': True, 'deps': True,
+                   'tables': True, 'import': True, 'code': True,
+                   'globals': True, 'code_cut': False, 'verify': True},
+        'tables': 'unit, ability, buff',
+        'roots': None,   # None = поле не менять, пользователь вписывает ID
+    },
+    'Только триггеры и код': {
+        'desc': 'Переносить только папки триггеров, шапку и globals.\n'
+                'Объекты и ассеты не трогаются. Маппинг/реестр\n'
+                'пересчитываются (нужны для замены литералов в коде).',
+        'stages': {'mapping': True, 'registry': True, 'code': True,
+                   'code_cut': False, 'globals': True, 'verify': True},
+        'tables': None,
+        'roots': None,
+    },
+}
+
+
 FONT = ("Segoe UI", 12)
 FONT_SMALL = ("Segoe UI", 11)
+FONT_MICRO = ("Segoe UI", 9)   # 22.10: описания пресетов
 FONT_MONO = ("Consolas", 10)
 
 # 20.10: единая палитра акцентов. Целерные литералы разъехались по окнам
@@ -473,6 +514,13 @@ class App(ctk.CTk):
         for s, v in self.stage_vars.items():
             for cb in self._stage_cbs.get(s, []):
                 cb.configure(state='disabled' if serv else 'normal')
+        # 22.10: пресеты — это донорная настройка переноса, в
+        # обслуживании недоступны
+        try:
+            self.preset_box.configure(state='disabled' if serv else 'readonly')
+            self.b_preset.configure(state='disabled' if serv else 'normal')
+        except Exception:
+            pass
         # кнопки переноса: единый список _donor_btns (собирается в _build),
         # донорные под-операции живут на вкладке Перенос и блокируются вместе
         # со всей строкой — донор в Обслуживании не задан
@@ -781,6 +829,29 @@ class App(ctk.CTk):
                             "0 = ждать сколько нужно (лимита нет).\n"
                             "Хранится в конфиге: safety.stage_timeout_min.")
 
+        # 22.10: пресеты настроек (просто выбор под задачу)
+        pres_l = ctk.CTkLabel(left, text="Пресеты", font=("Segoe UI", 12, "bold"),
+                              anchor="w")
+        pres_l.pack(fill="x", padx=12, pady=(10, 2))
+        self.preset_box = ctk.CTkComboBox(left, values=list(PRESETS),
+                                          font=FONT_SMALL, height=28,
+                                          state="readonly")
+        self.preset_box.set(list(PRESETS)[0])
+        self.preset_box.pack(fill="x", padx=12, pady=2)
+        self.preset_desc = ctk.CTkLabel(left, text=PRESETS['Полный перенос']['desc'],
+                                        font=FONT_MICRO, anchor="nw",
+                                        justify="left", wraplength=226)
+        self.preset_desc.pack(fill="x", padx=12, pady=(2, 4))
+        self.b_preset = ctk.CTkButton(left, text="Применить пресет", height=30)
+        self.b_preset.pack(fill="x", padx=12, pady=(0, 2))
+        self.b_preset.configure(command=self._apply_preset)
+        Tooltip(self.b_preset, "Установит этапы/таблицы/галочки под выбранную\n"
+                               "задачу. Dry-run и геометрию пресеты не включают.\n"
+                               "ID героев для пресета «Герои и способности»\n"
+                               "вписываются в «Корни deps». Конфиг записывается\n"
+                               "при следующем «Сохранить конфиг» как обычно.")
+        self.preset_box.configure(command=self._preset_desc)
+
         # правая колонка: настройки (скролл)
         right = ctk.CTkScrollableFrame(mid, fg_color="transparent")
         right.pack(side="left", fill="both", expand=True, pady=4)
@@ -814,6 +885,19 @@ class App(ctk.CTk):
                              checkbox_width=18, checkbox_height=18)
         c3.pack(anchor="w", pady=(6, 6))
         Tooltip(c3, "Вырезка кода находит литералы ID, которых нет в deps\n(дамми-способности и т.п.) и добавляет их в перенос.\nРаботает с кнопкой «Полный цикл».")
+        # 22.10: набор выбора (JSON): include/exclude_objects/exclude_triggers.
+        # По умолчанию файл ищется рядом с конфигом <имя конфига>_set.json;
+        # поле задаёт свой путь (пусто = автопуть).
+        ctk.CTkLabel(ri, text="Набор выбора (JSON, путь или пусто):",
+                     font=FONT_SMALL, anchor="w").pack(fill="x", pady=(8, 0))
+        self.e_setfile = ctk.CTkEntry(ri, font=FONT_MONO, height=28)
+        self.e_setfile.pack(fill="x")
+        Tooltip(self.e_setfile, "Файл выборочного переноса и исключений:\n"
+                                "{ include, exclude_objects, exclude_triggers }.\n"
+                                "include вливается в корни deps, exclude_objects\n"
+                                "вычёркивается из графа, exclude_triggers\n"
+                                "пропускает триггеры/папки донора при переносе кода.\n"
+                                "Пусто = <имя конфига>_set.json рядом с конфигом.")
 
         # 4. Таблицы
         cf2, ci2 = self._card(right, "4. Таблицы")
@@ -1486,6 +1570,31 @@ class App(ctk.CTk):
         except Exception:
             pass
 
+    # 22.10: пресеты настроек
+    def _preset_desc(self, name=None):
+        """Обновить описание пресета при смене выбора в списке."""
+        p = PRESETS.get(self.preset_box.get())
+        if p:
+            self.preset_desc.configure(text=p['desc'])
+
+    def _apply_preset(self):
+        """Пресет: этапы, таблицы, галочки. Dry-run и ID героев
+        не трогаются (решения остаются на пользователе)."""
+        p = PRESETS.get(self.preset_box.get())
+        if not p:
+            return
+        st = p['stages']
+        for s in STAGES:
+            self.stage_vars[s].set(bool(st.get(s, False)))
+        if p['tables'] is not None:
+            self.e_tables.delete(0, 'end')
+            self.e_tables.insert(0, p['tables'])
+        if p['roots'] is not None:
+            self.e_roots.delete(0, 'end')
+            if p['roots']:
+                self.e_roots.insert(0, p['roots'])
+        self._log('пресет применён: ' + self.preset_box.get(), 'ok')
+
     def _collect_cfg(self):
         cfg = self.cfg
         # 20.10 (аудит): гарантированные секции — на свежем/старом конфиге
@@ -1550,6 +1659,12 @@ class App(ctk.CTk):
         dep = self.e_deploy.get().strip()
         if dep:
             cfg['code']['deploy_to'] = dep
+        # 22.10: набор выбора (JSON): путь в конфиг либо автопуть
+        sf = self.e_setfile.get().strip()
+        if sf:
+            cfg.setdefault('selection', {})['file'] = sf
+        else:
+            cfg.get('selection', {}).pop('file', None)
         # 20.10 (аудит): round-trip галочки каталога — писали None (=True
         # по умолчанию), эффекта «выключить и перезапустить» не было
         cfg['code']['update_catalog'] = bool(self.v_updcatalog.get())
@@ -1642,6 +1757,9 @@ class App(ctk.CTk):
         # 19.09 (v6): deploy_to + каталог + монолит
         self.e_deploy.delete(0, 'end')
         self.e_deploy.insert(0, self.cfg.get('code', {}).get('deploy_to', ''))
+        # 22.10: набор выбора — восстановление пути (нет = автопуть)
+        self.e_setfile.delete(0, 'end')
+        self.e_setfile.insert(0, self.cfg.get('selection', {}).get('file', ''))
         uc = self.cfg.get('code', {}).get('update_catalog')
         self.v_updcatalog.set(True if uc is None else bool(uc))
         self.v_monolith.set(self.cfg.get('code', {}).get('include_monolith', False))

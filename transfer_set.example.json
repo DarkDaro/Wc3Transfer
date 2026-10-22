@@ -1,0 +1,15 @@
+{
+  "_comment": "Пример набора для выборочного переноса. Копировать рядом с конфигом как<имя конфига>_set.json (для transfer_config.json: transfer_config_set.json). Голый ID резолвится по таблицам донора; с префиксом типа (unit:Hgam) берётся как есть.",
+  "include": [
+    "Hgam",
+    "ability:A000"
+  ],
+  "exclude_objects": [
+    "ability:A000"
+  ],
+  "exclude_triggers": [
+    "01-PA1.j",
+    "2-Triggers/03-WillZoero.j",
+    "WillZoero"
+  ]
+}

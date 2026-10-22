@@ -41,7 +41,27 @@ def main():
     src = cfg['source']
     tb = os.path.join(src, 'table')
 
-    roots = cfg.get('deps', {}).get('roots', [])
+    roots = list(cfg.get('deps', {}).get('roots', []))
+    # 22.10: набор выбора (_JSON): include вливается в roots, голые ID
+    # резолвятся по таблицам донора ниже; exclude_objects вычёркиваются
+    # из замкнутого списка в конце (с предупреждением в отчёте).
+    import transfer_set as tset
+    sel = tset.load(cfgp, cfg)
+    excl_objs = set(sel.get('exclude_objects', []))
+    def norm_id(x):
+        """'unit:Hgam' -> 'Hgam'; голый ID остаётся."""
+        a, _, b = x.partition(':')
+        if b and a in ('unit', 'ability', 'buff', 'item', 'upgrade',
+                       'doodad', 'destructable'):
+            return b
+        return x
+    for x in sel.get('include', []):
+        nx = norm_id(x)
+        if nx not in roots:
+            roots.append(nx)
+    excl_objs = {norm_id(x) for x in excl_objs}
+    if sel.get('include'):
+        print('перенос-набор: include %d (влито в корни deps)' % len(sel['include']))
     if not roots:
         # 17.09: пустые roots = ПОЛНЫЙ перенос: все секции всех
         # таблиц + все ассеты resource. wanted=None означает
@@ -120,6 +140,18 @@ def main():
                         for tok in re.findall(r'[\w.\\/-]+\.(?:blp|mdl|mdx|tga)', v):
                             assets.add(tok)
                 break
+
+    # 22.10: вычеркнуть явные исключения (exclude_objects) ПОСЛЕ графа:
+    # исключённый объект не попадает в перенос и в маппинг, но его
+    # ассеты остаются в списке (безвредно: лишние импорты не ломают карту)
+    dropped = [k for k in keep if k in excl_objs]
+    for k in dropped:
+        keep.discard(k)
+        if k in queue:
+            queue.remove(k)
+    if dropped:
+        print('перенос-набор: ВЫЧЕРКНУТО (exclude): %d: %s'
+              % (len(dropped), ', '.join(sorted(dropped)[:20])))
 
     # проверка ассетов в источнике
     res_dirs = [os.path.join(src, 'resource'), os.path.join(src, 'sound')]

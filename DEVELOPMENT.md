@@ -138,6 +138,12 @@ B-литералы (баффы `'Bxxx'`) в этапе code заменяются
   задавать: источник истины «что стандарт»), case_conflict_check,
   duplicate_name_check;
 - `deps.roots`: ID героев/предметов, от которых строится граф;
+- `selection.file`: путь к набору выборочного переноса (22.10).
+  Пусто = `<имя конфига>_set.json` рядом с конфигом. Формат: списки
+  `include` (вливается в deps.roots), `exclude_objects` (вычёркивается
+  из закрытого графа), `exclude_triggers` (пропуск/файлов кода донора,
+  .j и .lml-пары; code-split не фильтруется). Пример:
+  `transfer_set.example.json`. Файл в .gitignore (личные выборки);
 - `code_cut`: entries (точки входа), auto_expand;
 - `safety`: backup_dir, state_file, dry_run_first, stop_on_error,
   stage_timeout_min (лимит этапа, минуты, 0 означает без лимита);

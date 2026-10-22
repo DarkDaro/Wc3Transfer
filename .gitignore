@@ -27,6 +27,8 @@ replace_std.json
 # ============================================
 _diag_*
 _t_*
+# 22.10: личный набор выборочного переноса (include/exclude) рядом с конфигом
+transfer_config_set.json
 _test_*
 _patch_*
 _study_*

@@ -100,6 +100,25 @@ def main():
                 files.append(os.path.join(cs, f))
     # 18.09: only_dirs — переносить ТОЛЬКО выбранные подпапки
     only = [d.strip() for d in cfg['code'].get('only_dirs', []) if d.strip()]
+    # 22.10: набор выбора — явные исключения триггеров (exclude_triggers):
+    # матч по имени файла ('01-PA1.j'), по пути донора ('2-Triggers/файл')
+    # или по базе без расширения ('WillZoero'). code-split не фильтруется
+    # (вырезка функций из монолита должна остаться целой).
+    import transfer_set as tset
+    sel = tset.load(cfgp, cfg)
+    _exc = sel.get('exclude_triggers', [])
+
+    def trig_skipped(path):
+        if not _exc:
+            return False
+        base = os.path.basename(path)
+        rel = os.path.relpath(path, trig_src).replace(os.sep, '/')
+        return (base in _exc or rel in _exc
+                or os.path.splitext(base)[0] in _exc)
+
+    if _exc:
+        print('перенос-набор: исключений триггеров: %d (%s%s)' % (
+            len(_exc), ', '.join(_exc[:6]), ' ...' if len(_exc) > 6 else ''))
     for root, dirs, fs in os.walk(trig_src):
         rel_root = os.path.relpath(root, trig_src)
         if only and rel_root != '.' and not any(rel_root == od or rel_root.startswith(od + os.sep) for od in only):
@@ -107,7 +126,10 @@ def main():
             continue
         for f in fs:
             if f.endswith('.j'):
-                files.append(os.path.join(root, f))
+                p = os.path.join(root, f)
+                if trig_skipped(p):
+                    continue
+                files.append(p)
 
     # 21.09 фикс D: GUI-триггеры донора = пары .lml+.txt в trigger/.
     # .lml — тело GUI-триггера (редактор генерит из него Trig_X_Actions
@@ -124,6 +146,8 @@ def main():
         for f in sorted(fs):
             if f.endswith('.lml') and f != 'catalog.lml' and f != 'variable.lml':
                 lml_p = os.path.join(root, f)
+                if trig_skipped(lml_p):
+                    continue
                 txt_p = lml_p[:-4] + '.txt'
                 gui_pairs.append((lml_p, txt_p if os.path.exists(txt_p) else None))
 
