@@ -289,7 +289,7 @@ class App(ctk.CTk):
         self.protocol('WM_DELETE_WINDOW', self._on_close)
         self.after(100, self._poll_log)
         # 22.10 (UI): горячие клавиши — вкладки и сохранение
-        for i, tabname in enumerate(('Перенос', 'Обслуживание', 'Журнал'), 1):
+        for i, tabname in enumerate(('Перенос', 'Обслуживание', 'Геометрия', 'Журнал'), 1):
             self.bind_all('<Control-Key-%d>' % i,
                           lambda e, t=tabname: self._goto_tab(t))
         self.bind_all('<Control-s>', lambda e: self._save_cfg())
@@ -562,16 +562,18 @@ class App(ctk.CTk):
         # --- 22.10 (UI): вкладки вместо одной высокой простыни ---
         # «Перенос» (карты, этапы, настройки, кнопки прогона),
         # «Обслуживание» (проверка, чистки, код, отчёты),
+        # «Геометрия» (перенос ландшафта: декор и юниты, doo),
         # «Журнал» (прогресс + журнал во всю высоту).
         # Переключатель режима в шапке синхронизирован с вкладкой.
         self._tab_guard = False
         self.tabview = ctk.CTkTabview(self)
         self.tabview.pack(fill="both", expand=True, padx=8, pady=(6, 0))
-        for tabname in ("Перенос", "Обслуживание", "Журнал"):
+        for tabname in ("Перенос", "Обслуживание", "Геометрия", "Журнал"):
             self.tabview.add(tabname)
         self.tabview.configure(command=lambda _v=None: self._on_tab())
         tab_t = self.tabview.tab("Перенос")
         tab_s = self.tabview.tab("Обслуживание")
+        tab_g = self.tabview.tab("Геометрия")
         tab_j = self.tabview.tab("Журнал")
 
         # содержимое вкладки Обслуживание: прокручиваемые группы операций
@@ -620,6 +622,63 @@ class App(ctk.CTk):
             if hint_text:
                 Tooltip(b, hint_text)
             return b
+
+        # --- вкладка «Геометрия» (22.10): перенос ландшафта одним местом ---
+        # stage geometry пишет декор и юниты в doo приёмника; ландшафт w3e
+        # не редактируется. Опции, запуск и предостережения в одной вкладке.
+        gf1, gi1 = self._card(tab_g, "1. Опции вставки")
+        gf1.pack(fill="x", padx=10, pady=(8, 4))
+        self.v_geom = tk.BooleanVar(value=False)
+        c4 = ctk.CTkCheckBox(gi1, text="Переносить декор и юнитов (этап geometry)",
+                             variable=self.v_geom, font=FONT_SMALL,
+                             checkbox_width=18, checkbox_height=18)
+        c4.pack(anchor="w")
+        Tooltip(c4, "Вставка декора/юнитов в doo приёмника со сдвигом offset.\n"
+                    "Включай только для переноса ландшафта!\n"
+                    "Повторный прогон задвоит декор: защиты нет.")
+        self.v_recz = tk.BooleanVar(value=True)
+        c4z = ctk.CTkCheckBox(gi1, text="Пересчитывать высоту (z) по рельефу приёмника",
+                              variable=self.v_recz, font=FONT_SMALL,
+                              checkbox_width=18, checkbox_height=18)
+        c4z.pack(anchor="w", pady=(4, 0))
+        Tooltip(c4z, "z берётся из карты приёмника на месте вставки.\n"
+                     "Выключи, чтобы сохранить z донора (декор повиснет,\n"
+                     "если рельеф различается).")
+        gfr = ctk.CTkFrame(gi1, fg_color="transparent")
+        gfr.pack(fill="x", pady=(6, 0))
+        ctk.CTkLabel(gfr, text="Сдвиг координат offset:", font=FONT_SMALL).pack(side="left")
+        ctk.CTkLabel(gfr, text="dx:", font=FONT_SMALL, width=24).pack(side="left", padx=(8, 0))
+        self.e_dx = ctk.CTkEntry(gfr, width=90, height=28, font=FONT_MONO)
+        self.e_dx.pack(side="left", padx=2)
+        ctk.CTkLabel(gfr, text="dy:", font=FONT_SMALL, width=24).pack(side="left")
+        self.e_dy = ctk.CTkEntry(gfr, width=90, height=28, font=FONT_MONO)
+        self.e_dy.pack(side="left", padx=2)
+        Tooltip(gfr, "Сдвиг декора (dx, dy) при вставке в приёмник.\n"
+                     "Обычно это разница координат карт (пример: донор у\n"
+                     "другого угла приёмника). Пусто = [0, 0].")
+
+        gf2, gi2g = self._card(tab_g, "2. Запуск")
+        gf2.pack(fill="x", padx=10, pady=4)
+        gbtns = ctk.CTkFrame(gi2g, fg_color="transparent")
+        gbtns.pack(fill="x")
+        self.b_geom_dry = ctk.CTkButton(gbtns, text="Dry-run геометрии", width=160,
+                                        height=32, font=FONT_SMALL,
+                                        command=lambda: self._run(['--stage', 'geometry', '--dry-run']))
+        self.b_geom_dry.pack(side="left", padx=3)
+        self.b_geom = ctk.CTkButton(gbtns, text="Вставить (запись!)", width=160,
+                                    height=32, font=FONT_SMALL,
+                                    fg_color=DANGER, hover_color=DANGER_H,
+                                    command=lambda: self._run(['--stage', 'geometry']))
+        self.b_geom.pack(side="left", padx=3)
+        Tooltip(self.b_geom_dry, "Прогон этапа geometry БЕЗ записи:\n"
+                                 "смотри журнал, что и куда встанет.")
+        Tooltip(self.b_geom, "Боевой прогон этапа geometry: декор и юниты\n"
+                             "в приёмник со сдвигом offset.\n"
+                             "Повторный прогон задвоит вставки.")
+        ctk.CTkLabel(gi2g, text="Приёмник берётся из поля «Приёмник» на вкладке\n"
+                                "Перенос, состояние этапа видно в Журнале и в\n"
+                                "прогрессе этапов.", font=FONT_SMALL,
+                     justify="left", anchor="w").pack(fill="x", pady=(6, 0))
 
         # --- 1. Карты ---
         cf, ci = self._card(tab_t, "1. Карты")
@@ -844,20 +903,8 @@ class App(ctk.CTk):
                               font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
         c12.pack(anchor="w")
         Tooltip(c12, "Ссылки на юнитов, которых нет на карте приёмника\n(торговцы донора) заменяются на null.\nСверка с war3mapUnits.doo приёмника. Выключи, если\nдобавишь юнитов на карту и хочешь живые переменные.")
-        self.v_geom = tk.BooleanVar(value=False)
-        c4 = ctk.CTkCheckBox(gi2, text="Геометрия (декор/юниты — РЕДКО!)", variable=self.v_geom,
-                             font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
-        c4.pack(anchor="w")
-        Tooltip(c4, "Вставка декора/юнитов в doo приёмника со сдвигом offset.\nВключай только для переноса ландшафта! Повторный прогон задвоит декор.")
-        gfr = ctk.CTkFrame(gi2, fg_color="transparent")
-        gfr.pack(fill="x", padx=12)
-        ctk.CTkLabel(gfr, text="offset dx:", font=FONT_SMALL).pack(side="left")
-        self.e_dx = ctk.CTkEntry(gfr, width=70, height=28, font=FONT_MONO)
-        self.e_dx.pack(side="left", padx=2)
-        ctk.CTkLabel(gfr, text="dy:", font=FONT_SMALL).pack(side="left")
-        self.e_dy = ctk.CTkEntry(gfr, width=70, height=28, font=FONT_MONO)
-        self.e_dy.pack(side="left", padx=4)
-        Tooltip(gfr, "Сдвиг координат декора (dx, dy) при вставке в приёмник.")
+        # 22.10: блок «Геометрия» (галочка и offset) переехал на ровную
+        # вкладку «Геометрия» — перенос ландшафта собран в одном месте
         self.v_allowb = tk.BooleanVar(value=True)
         c8 = ctk.CTkCheckBox(gi2, text="Заменять B-литералы (баффы) в коде", variable=self.v_allowb,
                              font=FONT_SMALL, checkbox_width=18, checkbox_height=18)
@@ -994,7 +1041,8 @@ class App(ctk.CTk):
         # добавление новой кнопки не требует правки режима вручную
         self._donor_btns = [self.b_plan, self.b_dry, self.b_remap, self.b_run,
                             self.b_loop, self.b_status, self.b_rollback,
-                            self.b_reset, self.b_triggers, self.b_tspawn]
+                            self.b_reset, self.b_triggers, self.b_tspawn,
+                            self.b_geom, self.b_geom_dry]
         self._svc_btns = [self.b_verify, self.b_cleanup, self.b_repair,
                           self.b_trigclean, self.b_rawconv]
 
@@ -1401,6 +1449,8 @@ class App(ctk.CTk):
         except ValueError:
             dx = dy = 0.0
         cfg['geometry']['offset'] = [dx, dy] if (dx or dy) else None
+        # 22.10: пересчёт высоты по рельефу приёмника (конфиг↔UI вместе)
+        cfg['geometry']['recount_z'] = self.v_recz.get()
         cfg['testspawn']['enabled'] = self.v_ts.get()
         cfg['testspawn']['heroes'] = [t.strip() for t in self.e_ts.get().split(',') if t.strip()]
         # 22.09: точка спавна — 'center' (0,0) или имя региона; конфиг↔UI вместе
@@ -1484,6 +1534,8 @@ class App(ctk.CTk):
         off = self.cfg.get('geometry', {}).get('offset') or [0, 0]
         self.e_dx.delete(0, 'end'); self.e_dx.insert(0, str(off[0]))
         self.e_dy.delete(0, 'end'); self.e_dy.insert(0, str(off[1]))
+        # 22.10: пересчёт высоты — восстановление из конфига
+        self.v_recz.set(self.cfg.get('geometry', {}).get('recount_z', True))
         self.v_ts.set(self.cfg.get('testspawn', {}).get('enabled', False))
         self.e_ts.delete(0, 'end'); self.e_ts.insert(0, ', '.join(self.cfg.get('testspawn', {}).get('heroes', [])))
         # 22.09: точка спавна — восстановление из конфига
