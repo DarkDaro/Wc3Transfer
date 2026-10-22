@@ -125,6 +125,9 @@ SHORT = {
 # зависят от карты-донора). Применяется к текущим галочкам GUI,
 # Dry-run остаётся как стоит (безопасность не перекрываем).
 # stages: {stage: on} само; не указанные этапы выключаются.
+# tupd: состояние галочки «Обновлять существующие объекты»
+# (22.10: пресет снимает застрявший с прошлого ремонта флаг
+# tables_update_existing, чтобы он не тянулся в обычный перенос).
 PRESETS = {
     'Полный перенос': {
         'desc': 'Всё: объекты, ассеты, триггеры, глобалы, верификация.\n'
@@ -135,6 +138,7 @@ PRESETS = {
                    'globals': True, 'code_cut': False, 'verify': True},
         'tables': 'unit, ability, buff, item, upgrade, doodad, destructable',
         'roots': '',
+        'tupd': False,
     },
     'Только герои и способности': {
         'desc': 'Юниты-герои, их способности, баффы, дамми и ассеты.\n'
@@ -146,6 +150,7 @@ PRESETS = {
                    'globals': True, 'code_cut': False, 'verify': True},
         'tables': 'unit, ability, buff',
         'roots': None,   # None = поле не менять, пользователь вписывает ID
+        'tupd': False,
     },
     'Только триггеры и код': {
         'desc': 'Переносить только папки триггеров, шапку и globals.\n'
@@ -155,6 +160,7 @@ PRESETS = {
                    'code_cut': False, 'globals': True, 'verify': True},
         'tables': None,
         'roots': None,
+        'tupd': False,
     },
 }
 
@@ -847,7 +853,9 @@ class App(ctk.CTk):
         self.b_preset.configure(command=self._apply_preset)
         Tooltip(self.b_preset, "Установит этапы/таблицы/галочки под выбранную\n"
                                "задачу. Dry-run и геометрию пресеты не включают.\n"
-                               "ID героев для пресета «Герои и способности»\n"
+                               "22.10: пресет также снимает галочку «Обновлять\n"
+                               "существующие объекты» (это режим ремонта).\n"
+                               "ID героев для пресета «Только герои и способности»\n"
                                "вписываются в «Корни deps». Конфиг записывается\n"
                                "при следующем «Сохранить конфиг» как обычно.")
         self.preset_box.configure(command=self._preset_desc)
@@ -1593,6 +1601,9 @@ class App(ctk.CTk):
             self.e_roots.delete(0, 'end')
             if p['roots']:
                 self.e_roots.insert(0, p['roots'])
+        # 22.10: флаг обновления существующих секций — режим ремонта,
+        # пресет снимает его (v_tupd, cfg->tables_update_existing)
+        self.v_tupd.set(bool(p.get('tupd', False)))
         self._log('пресет применён: ' + self.preset_box.get(), 'ok')
 
     def _collect_cfg(self):
