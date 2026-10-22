@@ -45,36 +45,23 @@ def write_doo(recs, out_path):
     io.open(out_path, 'wb').write(out.getvalue())
 
 def read_w3e_heights(path):
-    """Высоты рельефа приёмника: {(tx, ty): height_float} по центрам тайлов."""
-    d = io.open(path, 'rb').read()
-    # 21.10 (аудит): мёртвый черновик разбора заголовка оставлен
-    # закомментированным (ничего не удаляем), рабочий блок ниже.
-    # off = 0
-    assert d[0:4] == b'W3E!'
-    # off = 4
-    # ver = int.from_bytes(d[off:off+4], 'little'); off += 4
-    # off += 4  # saves
-    # off += 4  # editor
-    # ng = int.from_bytes(d[off:off+4], 'little'); off += 4 + ng*4
-    # nc = int.from_bytes(d[off:off+4], 'little'); off += 4 + nc*4 if False else off
-    # аккуратно:
-    off = 4 + 4 + 4 + 4
-    ng = int.from_bytes(d[off:off+4], 'little'); off += 4
-    off += ng * 4
-    nc = int.from_bytes(d[off:off+4], 'little'); off += 4
-    off += nc * 4
-    Mx = int.from_bytes(d[off:off+4], 'little'); off += 4
-    My = int.from_bytes(d[off:off+4], 'little'); off += 4
-    off += 8  # center
+    """Высоты рельефа приёмника: {(tx, ty): height_float} по центрам тайлов.
+    22.10: разбор теперь через parse_w3e (перебор схем с проверкой длин).
+    Старая схема (off=16, «saves+editor») на w3e ver 11 молча давала
+    Mx=My=0 и пустой словарь высот: recount_z ставил всем вставкам z=0.
+    Теперь либо честные высоты, либо ValueError (молчаливый мусор
+    невозможен)."""
+    m = parse_w3e(path)
     heights = {}
-    for j in range(My):
-        for i in range(Mx):
-            o = off + (j*Mx + i)*7
+    tiles = m['tiles']
+    for j in range(m['My']):
+        for i in range(m['Mx']):
+            o = (j*m['Mx'] + i)*7
             # gH: unsigned 14-бит, смещение 8192, масштаб /4
             # (проверено на UFS->LoW, ufs_shift_512.py)
-            gh = int.from_bytes(d[o:o+2], 'little')
+            gh = int.from_bytes(tiles[o:o+2], 'little')
             heights[(i, j)] = (gh - 8192) / 4.0
-    return heights, Mx, My
+    return heights, m['Mx'], m['My']
 
 def terrain_z(heights, Mx, My, x, y):
     """Высота рельефа в мировой точке (x, y). Тайл 128 юнитов."""
@@ -238,8 +225,18 @@ def main():
     tgt_map = os.path.join(tgt, 'map')
 
     # рельеф приёмника для z
-    heights, Mx, My = read_w3e_heights(os.path.join(tgt_map, 'war3map.w3e'))
-    recount_z = geo.get('recount_z', True)
+    # 22.10: если w3e не разобрать (ver 11 нестандартный), recount_z
+    # отключается: z берётся из донора, а не ставится 0 молча
+    try:
+        heights, Mx, My = read_w3e_heights(os.path.join(tgt_map, 'war3map.w3e'))
+    except ValueError as ex:
+        print('geometry: высоты рельефа недоступны (%s) — recount_z выключен, '
+              'z вставок берётся из донора' % ex)
+        heights, Mx, My = {}, 1, 1
+        recount_z_dis = True
+    else:
+        recount_z_dis = False
+    recount_z = geo.get('recount_z', True) and not recount_z_dis
     # 22.10: ландшафт (w3e) — вставка со смещением. По умолчанию ВЫКЛ,
     # включается в GUI/конфиге (geometry.w3e.enabled). Если клетки заменены,
     # пересчёт z у декора/юнитов идёт уже по merged-рельефу (высоты донора
