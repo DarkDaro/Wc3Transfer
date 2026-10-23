@@ -328,6 +328,64 @@ def main():
                 print('IMP.INI (предупреждение, файл мог быть удалён ранее):', nm)
                 warns += 1
 
+    # 8-10 (24.10): проверки волн переноса, которые раньше ловили
+    # только вручную (аудит 23-24.10).
+    # 8: донорские равкоды, оставшиеся в перенесённых lml (GUI-триггеры
+    #    ссылаются на объект, которого в приёмнике нет)
+    # 9: донорские hex-литералы (0xXXXXXXXX) в перенесённых .j
+    #    (равкод в числовой форме, hex_sub не сработал/хвост старого
+    #    прогона)
+    # 10: дубли записей imp.ini
+    donor_codes = {}
+    for k2, v2 in mp.items():
+        t2, old2 = k2.split(':', 1) if ':' in k2 else ('', k2)
+        if len(old2) == 4 and old2 != v2:
+            donor_codes[old2] = v2
+    if donor_codes:
+        valid_ids = set()
+        for t in cfg['tables']:
+            valid_ids |= parse_sections(os.path.join(tgt, 'table', t + '.ini'))
+        for ids2 in pb.values():
+            valid_ids |= ids2
+        # папки переноса — те же маркеры, что у проверки скобок (блок 5)
+        for ddir in ddirs:
+            if not os.path.isdir(ddir):
+                continue
+            for root, dirs, fs in os.walk(ddir):
+                for f in fs:
+                    p2 = os.path.join(root, f)
+                    if f.endswith('.lml') and f not in ('catalog.lml', 'variable.lml'):
+                        txt2 = io.open(p2, 'rb').read().decode('utf-8', errors='replace')
+                        for m2 in re.finditer(r'^\s*[A-Za-z_][A-Za-z0-9_]*\s*:\s*([A-Za-z0-9]{4})\s*$', txt2.replace(os.linesep, chr(10)), re.M):
+                            code = m2.group(1)
+                            if code in donor_codes and donor_codes[code] not in valid_ids:
+                                print('ДОНОРСКИЙ РАВКОД В LML %s: %s (должно быть %s)'
+                                      % (os.path.relpath(p2, tgt), code, donor_codes[code]))
+                                errs += 1
+                    elif f.endswith('.j'):
+                        s3 = io.open(p2, 'rb').read().decode('utf-8', errors='replace')
+                        for m3 in re.finditer(r'(?<![0-9a-zA-Z_.])0[xX]([0-9a-fA-F]{8})(?![0-9a-fA-F_.])', s3):
+                            try:
+                                raw3 = int(m3.group(1), 16).to_bytes(4, 'big').decode('ascii')
+                            except Exception:
+                                continue
+                            if (raw3 in donor_codes
+                                    and donor_codes[raw3] not in valid_ids
+                                    and all(0x21 <= ord(c) <= 0x7E for c in raw3)):
+                                print('ДОНОРСКИЙ РАВКОД-HEX В .j %s: 0x%s (должно быть %s)'
+                                      % (os.path.relpath(p2, tgt), raw3, donor_codes[raw3]))
+                                errs += 1
+
+    if os.path.exists(imp_p):
+        s4 = io.open(imp_p, 'rb').read().decode('utf-8', errors='replace')
+        seen_imp = {}
+        for m4 in re.finditer(r'"([^"]+)"', s4):
+            seen_imp[m4.group(1)] = seen_imp.get(m4.group(1), 0) + 1
+        for nm4, c4 in sorted(seen_imp.items()):
+            if c4 > 1:
+                print('IMP.INI (предупреждение, дублирующая запись, %d): %s' % (c4, nm4))
+                warns += 1
+
     print('=== ВЕРИФИКАЦИЯ: ошибок %d, предупреждений %d' % (errs, warns))
     sys.exit(1 if errs else 0)
 
