@@ -4,7 +4,7 @@
 # 3. Ссылки в abilList/buffList перенесённых секций целы (в приёмнике)
 # 4. Ассеты из deps на диске приёмника (или стандартные WC3)
 # 5. Баланс скобок в .j приёмника (только перенесённые файлы)
-import io, os, sys, json, re
+import io, os, sys, json, re, hashlib
 
 def parse_sections(path):
     # с поддержкой [=[ ]=] блоков (текст внутри — не секции)
@@ -385,6 +385,66 @@ def main():
             if c4 > 1:
                 print('IMP.INI (предупреждение, дублирующая запись, %d): %s' % (c4, nm4))
                 warns += 1
+
+    # 11 (24.10): контент-конфликт ассетов под одним именем. Пример:
+    # перенесённый объект ссылается на 'X.mdl' (движковый путь), файл
+    # 'X.mdx' есть и у приёмника и у донора, но содержимое РАЗНОЕ
+    # (текстура переделана, модель перекомпилирована) — объект
+    # показывает РОДНОЙ ассет приёмника. Размер (вес) не критерий:
+    # разные файлы могут весить одинаково — сравнивается md5.
+    if mp and os.path.isdir(os.path.join(cfg.get('source', ''), 'resource')):
+        src_res = os.path.join(cfg['source'], 'resource')
+        tgt_res = os.path.join(tgt, 'resource')
+
+        def _md5(p):
+            return hashlib.md5(io.open(p, 'rb').read()).hexdigest()
+
+        # перенесённые секции (old != new) — только их поля проверяем
+        moved_secs = {}
+        for k5, v5 in mp.items():
+            t5, old5 = k5.split(':', 1)
+            if old5 != v5:
+                moved_secs.setdefault(t5, set()).add(v5)
+        ART_FIELDS = re.compile(
+            r'^(?:file|Art|Model|TargetArt|CasterArt|EffectArt|MissileArt|'
+            r'SpecialArt|ButtonModel|ScoreScreenIcon)\s*=\s*"?([^"\n]+)', re.I | re.M)
+        checked_warn = set()
+        for t in cfg['tables']:
+            tp_ = os.path.join(tgt, 'table', t + '.ini')
+            if not os.path.exists(tp_):
+                continue
+            bodies2 = parse_bodies(tp_)
+            for sid in moved_secs.get(t, set()):
+                body5 = bodies2.get(sid)
+                if not body5:
+                    continue
+                txt5 = chr(10).join(body5) if isinstance(body5, list) else body5
+                for m5 in ART_FIELDS.finditer(txt5):
+                    for chunk5 in m5.group(1).split(','):
+                        c5 = chunk5.strip()
+                        if not c5 or re.search(r'_v[0-9]+\.', c5):
+                            continue
+                        p_t = os.path.join(tgt_res, c5.replace('\\\\', '\\').replace('/', os.sep))
+                        p_d = os.path.join(src_res, c5.replace('\\\\', '\\').replace('/', os.sep))
+                        p_d2 = os.path.join(src_res, 'sound', c5.replace('\\\\', '\\').replace('/', os.sep))
+                        if not os.path.exists(p_t):
+                            continue
+                        dsrc = p_d if os.path.exists(p_d) else (p_d2 if os.path.exists(p_d2) else None)
+                        if dsrc is None or _md5(dsrc) == _md5(p_t):
+                            continue
+                        key = (t, sid, c5)
+                        if key in checked_warn:
+                            continue
+                        checked_warn.add(key)
+                        print('АССЕТ-КОНФЛИКТ (одно имя, разный контент): %s:%s -> %s'
+                              % (t, sid, c5))
+                        print('    приёмник: %d байт md5 %s | донор: %d байт md5 %s'
+                              % (os.path.getsize(p_t), _md5(p_t)[:8],
+                                 os.path.getsize(dsrc), _md5(dsrc)[:8]))
+                        print('    донорский файл импортируется как '
+                              '"%s _vN" при конфликте имён — проверь замену пути в поле'
+                              % c5)
+                        warns += 1
 
     print('=== ВЕРИФИКАЦИЯ: ошибок %d, предупреждений %d' % (errs, warns))
     sys.exit(1 if errs else 0)

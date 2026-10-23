@@ -105,14 +105,17 @@ def main():
             continue
         # ПЕРЕКРЫТИЕ игровой модели: стандартный путь, но файл есть
         # в импорте источника — импорт заменит модель ВСЕЙ карты!
-        # 20.09: allow_override=False — НЕ перехватывать (пропуск)
-        if al.startswith(('abilities/', 'units/', 'replaceabletextures/')):
-            if not allow_override:
-                skipped += 1
-                continue
-            print('  ВНИМАНИЕ (перекрытие игровой модели):', a)
-            print('    -> импорт заменит модель ГЛОБАЛЬНО для всей карты приёмника')
-            print('    источник:', found)
+        # 20.09: allow_override=False — НЕ перекрывать глобально.
+        # 24.10: раньше пропуск СОВСЕМ терял донорский файл (иконки
+        # BTN_CR_Mojo.blp, BTNdivinerapier.blp — перенесённые скиллы
+        # показывали родные иконки приёмника с другим контентом).
+        # Теперь не-перекрытие = обычный конфликт: донорский файл
+        # копируется как _vN рядом, renames -> tables подставит _vN
+        # в перенесённые объекты; родные объекты приёмника остаются
+        # на своём файле.
+        if al.startswith(('abilities/', 'units/', 'replaceabletextures/')) and not allow_override:
+            print('  ВНИМАНИЕ (игровой путь, без перекрытия):', a)
+            print('    -> донорский файл пойдёт рядом (_vN), родной остаётся')
         dst = os.path.join(imp_root, a.replace('\\', os.sep))
         if os.path.exists(dst):
             if md5(dst) == md5(found):
@@ -202,9 +205,8 @@ def main():
                 al = a.lower().replace('\\', '/')
                 if is_excluded(al):
                     continue
-                # 20.09: allow_override=False — игровые пути не пишем
-                if not allow_override and al.startswith(('abilities/', 'units/', 'replaceabletextures/')):
-                    continue
+                # 24.10: игровые пути пишутся как обычные (vN-рядом);
+                # allow_override=True теперь бессмысленно фильтрует
                 found = any(os.path.exists(os.path.join(d, a.replace('\\', os.sep))) for d in src_dirs)
                 if not found:
                     continue
