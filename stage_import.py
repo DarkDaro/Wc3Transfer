@@ -119,26 +119,51 @@ def main():
                 same += 1  # идентичен — пропуск
                 continue
             # разный: <имя>_v2.<ext> (если занято — v3, v4...)
-            k = 2
-            while True:
-                b, e = os.path.splitext(dst)
-                cand = '%s_v%d%s' % (b, k, e)
-                if not os.path.exists(cand):
-                    dst2 = cand
-                    break
-                k += 1
-            if dry:
-                print('  КОНФЛИКТ: %s -> %s' % (a, os.path.basename(dst2)))
+            # 23.10: сначала повторно используем СУЩЕСТВУЮЩИЙ суффикс,
+            # чей файл уже равен донору (мд5). Раньше каждый повторный
+            # прогон порождал новый суффикс (v2 -> v3 -> ...), а
+            # tables получал замены ПОСЛЕ import и писал старые пути.
+            donor_md5 = md5(found)
+            chosen = None
+            # путь из прошлого прогона (deps carry-over) — приоритетен
+            prev_new = deps.get('assets_renames', {}).get(a)
+            if prev_new:
+                pc = os.path.join(imp_root, prev_new.replace('\\', os.sep))
+                if os.path.exists(pc) and md5(pc) == donor_md5:
+                    chosen = prev_new
+            if chosen is None:
+                k = 2
+                while True:
+                    b, e = os.path.splitext(dst)
+                    cand = '%s_v%d%s' % (b, k, e)
+                    if os.path.exists(cand) and md5(cand) == donor_md5:
+                        chosen = os.path.relpath(cand, imp_root)
+                        break
+                    if not os.path.exists(cand):
+                        break
+                    k += 1
+            if chosen is None:
+                k = 2
+                while True:
+                    b, e = os.path.splitext(dst)
+                    cand = '%s_v%d%s' % (b, k, e)
+                    if not os.path.exists(cand):
+                        chosen = os.path.relpath(cand, imp_root)
+                        break
+                    k += 1
+                if dry:
+                    print('  КОНФЛИКТ: %s -> %s' % (a, os.path.basename(chosen)))
+                else:
+                    os.makedirs(os.path.dirname(os.path.join(imp_root, chosen)), exist_ok=True)
+                    io.open(os.path.join(imp_root, chosen), 'wb').write(io.open(found, 'rb').read())
+                    copied += 1
             else:
-                os.makedirs(os.path.dirname(dst2), exist_ok=True)
-                io.open(dst2, 'wb').write(io.open(found, 'rb').read())
-                note_created(dst2)
-            # путь в приёмнике: resource/<отн. путь>
+                if dry:
+                    print('  ПОВТОР (суффикс уже равен донору): %s -> %s' % (a, chosen))
             old_rel = a
-            new_rel = os.path.relpath(dst2, imp_root)
+            new_rel = chosen
             renames[old_rel] = new_rel
             renamed += 1
-            copied += 1
             continue
         if dry:
             print('  скопировать:', a)
@@ -165,7 +190,9 @@ def main():
         print('renames записаны в deps_result.json')
 
     # регистрация в table/imp.ini (реестр импорта приёмника)
-    if copied and not dry:
+    # 23.10: renamed тоже попадает сюда — переиспользованные суффиксы
+    # не копируют файл, но их пути должны быть в imp.ini
+    if (copied or renamed) and not dry:
         imp_p = os.path.join(tgt, 'table', 'imp.ini')
         if os.path.exists(imp_p):
             cur = io.open(imp_p, 'rb').read().decode('utf-8', errors='replace')

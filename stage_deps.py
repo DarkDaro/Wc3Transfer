@@ -5,6 +5,13 @@
 # Выход: отчёт (stdout) + deps_result.json
 import io, os, sys, json, re
 
+def _prev_full_renames(outp):
+    """23.10: carry-over assets_renames из прошлого deps_result.json."""
+    try:
+        return json.load(io.open(outp, 'rb')).get('assets_renames') or {}
+    except Exception:
+        return {}
+
 def parse_sections(path):
     out = {}
     if not os.path.exists(path):
@@ -82,7 +89,12 @@ def main():
                 rel = os.path.relpath(os.path.join(root, f), res)
                 assets.append(rel.replace(os.sep, '\\'))
         outp = os.path.join(os.path.dirname(os.path.abspath(cfgp)), 'deps_result.json')
+        # 23.10: carry читается ДО открывания wb (io.open(wb) усекает
+        # файл сразу, а json.dumps вычисляется при .write — иначе
+        # helper читает уже пустой файл и замены путей теряются)
+        _carry_renames = _prev_full_renames(outp)
         io.open(outp, 'wb').write(json.dumps({
+            'assets_renames': _carry_renames,
             'roots': [],
             'objects': all_objs,
             'assets': sorted(assets),
