@@ -223,14 +223,28 @@ def main():
         # 22.10: одно имя с другим типом или array флагом донора
         # молча пропускалось (n in vl_dst) и редактор тихо использовал
         # чужой тип. Теперь такой конфликт виден в отчёте.
+        # 24.10: конфликтные переменные ДОПИСЫВАЮТСЯ в variable.lml под
+        # именем <deploy_to>_<имя> (донорский тип/размер сохраняется);
+        # перенесённые lml/.j уже ссылаются на новое имя (stage_code).
+        # Раньше донорский GUI-триггер работал с чужим типом/размером:
+        # AModInteger integer array(20) против приёмника integervar
+        # array(1).
+        vl_prefix = (cfg.get('code', {}).get('deploy_to') or 'UFS').strip() + '_'
+        vl_conf = []
         for n, (t, a) in vl_src.items():
             if n in vl_dst:
                 t2, a2 = vl_dst[n]
                 if t2 != t or bool(a) != bool(a2):
-                    print('ВНИМАНИЕ variable.lml: %s тип донора %s%s vs приёмника %s%s'
+                    vl_conf.append((vl_prefix + n, t, a, n))
+                    print('ВНИМАНИЕ variable.lml: %s тип донора %s%s vs приёмника %s%s -> дописана под именем %s'
                           % (n, t, ' array(%d)' % a if a else '',
-                             t2, ' array(%d)' % a2 if a2 else ''))
+                             t2, ' array(%d)' % a2 if a2 else '', vl_prefix + n))
         vl_add = [(n, t, a) for n, (t, a) in vl_src.items() if n not in vl_dst]
+        # 24.10: конфликтные под новыми именами — в ту же дописку
+        exist_names = set(vl_dst)
+        for nn, t, a, _old in vl_conf:
+            if nn not in exist_names:
+                vl_add.append((nn, t, a))
         if dry:
             print('variable.lml: не хватает %d из донора (dry-run, не пишу)' % len(vl_add))
         elif vl_add:

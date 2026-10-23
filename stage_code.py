@@ -202,29 +202,57 @@ def main():
     # равкоды приёмника, теги FTtw и пр.) остаются как есть.
     hex_sub = None
     if lit:
+        # 24.10: ключи СТРОКОВЫЕ (замена идёт по тексту .j после decode);
         _hex_map = {}
         for _old, (_new, _ty) in lit.items():
             if _old and len(_old) == 4:
                 try:
                     _b = _old.encode('ascii')
-                    if all(0x21 <= c <= 0x7E for c in _b):
-                        _hex_map[b'0x' + _b.hex().upper().encode()] = (_new, _ty)
-                        _hex_map[b'0x' + _b.hex().lower().encode()] = (_new, _ty)
                 except Exception:
-                    pass
+                    continue
+                if not all(0x21 <= c <= 0x7E for c in _b):
+                    continue
+                for _c in _b.hex(), _b.hex().upper(), _b.hex().lower():
+                    _hex_map['0x' + _c] = _new
+                    _hex_map['0X' + _c] = _new
 
-        hex_pat = re.compile(rb'(?<![0-9a-zA-Z_.])'
-                             rb'0x(?:' + b'|'.join(re.escape(t) for t in _hex_map) + rb')'
-                             rb'(?![0-9a-fA-F_.])')
+        _hex_pat = re.compile('(?<![0-9a-zA-Z_.])'
+                              '0[xX](?:' + '|'.join(k2[2:] for k2 in _hex_map) + ')'
+                              '(?![0-9a-fA-F_.])')
 
         def _hex_sub(m):
-            # 23.10: замена только по точному верхнему/нижнему hex
-            v = _hex_map.get(m.group(0))
-            if not v:
-                return m.group(0)
-            return "'" + v[0] + "'"
+            # точное совпадение значения (регистр фиксируется ключом);
+            # keys хранятся с префиксом, m.group(0) сравнивается целиком
+            n2 = _hex_map.get(m.group(0))
+            return ("'" + n2 + "'") if n2 else m.group(0)
 
-        hex_sub = (hex_pat, _hex_sub)
+        hex_sub = (_hex_pat, _hex_sub)
+
+    # 24.10: конфликтные переменные донора (имя совпадает с приёмником,
+    # но тип/размер другой, напр. AModInteger integer array(20) vs
+    # integervar array(1)): в перенесённых lml/.j имя заменяется на
+    # <deploy_to>_<имя>, а донорские объявления stage_globals дописывает
+    # в variable.lml приёмника. Без этого GUI-триггер донора работал с
+    # чужим типом/размером переменной молча.
+    var_renames = {}
+    var_pat = None
+    vl_src_p = os.path.join(src, 'trigger', 'variable.lml')
+    vl_dst_p = os.path.join(tgt, 'trigger', 'variable.lml')
+    if os.path.exists(vl_src_p) and os.path.exists(vl_dst_p):
+        import stage_globals as _sg
+        vl_src = _sg.vl_parse(io.open(vl_src_p, 'rb').read().decode('utf-8', 'replace'))
+        vl_dst = _sg.vl_parse(io.open(vl_dst_p, 'rb').read().decode('utf-8', 'replace'))
+        _vp = (cfg.get('code', {}).get('deploy_to') or 'UFS').strip() + '_'
+        for _n, (_t, _a) in vl_src.items():
+            if _n in vl_dst:
+                _t2, _a2 = vl_dst[_n]
+                if _t2 != _t or bool(_a) != bool(_a2):
+                    var_renames[_n] = _vp + _n
+    if var_renames:
+        print('ГЛОБАЛЫ-КОНФЛИКТЫ (переименованы): ' + ', '.join(
+            '%s->%s' % (_a, _b) for _a, _b in sorted(var_renames.items())))
+        var_pat = (re.compile(r'\budg_(?:' + '|'.join(re.escape(x) for x in var_renames) + r')\b'),
+                   lambda m: 'udg_' + var_renames[m.group(0)[4:]])
 
     # 18.09 (v5): префикс функций импорта.
     # Собираю имена всех функций донора из переносимых
@@ -582,6 +610,9 @@ def main():
         # 23.10: hex-равкоды донора (0x6E303042 -> 'n00B' -> маппинг)
         if hex_sub is not None:
             s2 = hex_sub[0].sub(hex_sub[1], s2)
+        # 24.10: конфликтные udg_-переменные донора -> <deploy_to>_<имя>
+        if var_pat is not None:
+            s2 = var_pat[0].sub(var_pat[1], s2)
         # 18.09 (v5): префикс функций — объявления и вызовы.
         # Только имена функций донора, не нативы/константы.
         # 22.10: один предкомпилированный проход вместо 4 замены
@@ -654,6 +685,13 @@ def main():
                     n = lit.get(p)
                     if n and n[0] != p:
                         rep.append(n[0])
+                        hit = True
+                    # 24.10: конфликтные переменные донора под новым именем
+                    elif p in var_renames:
+                        rep.append(var_renames[p])
+                        hit = True
+                    elif p.startswith('udg_') and p[4:] in var_renames:
+                        rep.append('udg_' + var_renames[p[4:]])
                         hit = True
                     else:
                         rep.append(p)
