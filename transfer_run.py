@@ -6,7 +6,9 @@
 #   python transfer_run.py --all             # весь пайплайн
 #   python transfer_run.py --rollback        # откат к последнему успешному этапу
 #   python transfer_run.py --status          # состояние (state)
-# Этапы: mapping -> registry -> deps -> tables -> import -> code -> geometry -> verify
+# 24.10: Этапы: registry -> deps -> import -> mapping -> tables -> code
+# -> geometry -> verify (deps РАНЬШЕ mapping: mapping читает deps_result;
+# import РАНЬШЕ tables: renames конфликтов доступны tables сразу)
 import io, os, sys, json, hashlib, shutil, time, threading
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -19,14 +21,18 @@ if '--config' in sys.argv:
     CFG_PATH = os.path.abspath(sys.argv[i + 1])
     del sys.argv[i:i + 2]
 
-STAGES = ['mapping', 'registry', 'deps', 'tables', 'import', 'code', 'code_cut', 'globals', 'geometry', 'testspawn', 'verify']
+# 24.10: порядок — deps до mapping (mapping читает deps_result.json),
+# import до tables (renames конфликтов записаны import в deps_result,
+# tables применяет их к путям в том же прогоне)
+STAGES = ['registry', 'deps', 'import', 'mapping', 'tables', 'code',
+          'code_cut', 'globals', 'geometry', 'testspawn', 'verify']
 
 # профиль -> какие этапы включены
 PROFILES = {
-    'heroes': ['mapping', 'registry', 'deps', 'tables', 'import', 'code', 'globals', 'testspawn'],
-    'objects': ['mapping', 'registry', 'deps', 'tables', 'import', 'code', 'globals'],
-    'items': ['mapping', 'registry', 'deps', 'tables', 'import'],
-    'full': ['mapping', 'registry', 'deps', 'tables', 'import', 'code', 'globals', 'geometry', 'testspawn'],
+    'heroes': ['registry', 'deps', 'import', 'mapping', 'tables', 'code', 'globals', 'testspawn'],
+    'objects': ['registry', 'deps', 'import', 'mapping', 'tables', 'code', 'globals'],
+    'items': ['registry', 'deps', 'import', 'mapping', 'tables'],
+    'full': ['registry', 'deps', 'import', 'mapping', 'tables', 'code', 'globals', 'geometry', 'testspawn'],
     'custom': None,  # по конфигу
 }
 
@@ -390,7 +396,9 @@ def main():
             # на code_cut (выключен в конфиге -> no-op): триггеры НИКОГДА
             # не переносились в --loop. В цикле обязаны быть code (триггеры)
             # и globals (без них код не скомпилилится). code_cut — опция.
-            core = [s for s in ['deps', 'mapping', 'tables', 'import',
+            # 24.10: порядок как в --all (import до tables — renames
+            # доступны таблицам в той же итерации)
+            core = [s for s in ['deps', 'import', 'mapping', 'tables',
                                 'code', 'globals', 'code_cut']
                     if s in stages or s == 'code_cut']
             for it in range(1, 6):

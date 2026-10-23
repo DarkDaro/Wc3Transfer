@@ -56,15 +56,34 @@ def replace_refs_in_body(lines, ref_map):
 
 def replace_asset_paths(lines, renames):
     """20.10: пути из deps_result.assets_renames (конфликт -> _v2).
-    В ini/lml слеши удвоены, поэтому проверяем оба написания."""
+    В ini/lml слеши удвоены, поэтому проверяем оба написания.
+    24.10: sibling-расширения — донорские объекты ссылаются на путь
+    с «движковым» расширением (unit Art: 'X.mdl', импортировался
+    'X.mdx'): замена 'X.mdx'->'X_v2.mdx' не подменяла поле 'X.mdl',
+    и объект оставался на РОДНОЙ модели приёмника. Теперь каждая пара
+    old->new замещает и родственные расширения (mdl/mdx, blp/tga,
+    mp3/wav игнорируем: звук путём ссылается точно)."""
     if not renames:
         return lines
+    SIB = {'mdx': ('mdl', 'mdx'), 'mdl': ('mdl', 'mdx'),
+           'blp': ('blp', 'tga'), 'tga': ('blp', 'tga')}
     pairs = []
     for old, new in renames.items():
         new_s = new.replace('\\', '\\\\')
         pairs.append((old, new_s))
         pairs.append((old.replace('\\', '\\\\'), new_s))
         pairs.append((old.replace('/', '\\\\'), new_s))
+        # 24.10: sibling-расширение обеих сторон
+        ob, oe = os.path.splitext(old)
+        nb, ne = os.path.splitext(new)
+        oe_l = oe.lower().lstrip('.')
+        if oe_l in SIB:
+            for sib in SIB[oe_l]:
+                if sib == oe_l:
+                    continue
+                o2 = ob + '.' + sib
+                pairs.append((o2, nb + '.' + ne))
+                pairs.append((o2.replace('\\', '\\\\'), nb.replace('\\', '\\\\') + '.' + ne))
     out = []
     for l in lines:
         for old, new in pairs:

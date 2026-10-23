@@ -83,11 +83,18 @@ def main():
                 if secs:
                     all_objs[t] = sorted(secs)
         assets = []
-        res = os.path.join(src, 'resource')
-        for root, dirs, files in os.walk(res):
-            for f in files:
-                rel = os.path.relpath(os.path.join(root, f), res)
-                assets.append(rel.replace(os.sep, '\\'))
+        # 24.10: звук донора тоже в список ассетов (раньше полный
+        # перенос терял sound/: 5 кастомных mp3 донора не импортировались,
+        # а код приёмника ссылался на них). Пути относительны своей папке;
+        # stage_import ищет по обоим корням copy_dirs (resource, sound).
+        for snd_dir in ('resource', 'sound'):
+            res = os.path.join(src, snd_dir)
+            if not os.path.isdir(res):
+                continue
+            for root, dirs, files in os.walk(res):
+                for f in files:
+                    rel = os.path.relpath(os.path.join(root, f), res)
+                    assets.append(rel.replace(os.sep, '\\'))
         outp = os.path.join(os.path.dirname(os.path.abspath(cfgp)), 'deps_result.json')
         # 23.10: carry читается ДО открывания wb (io.open(wb) усекает
         # файл сразу, а json.dumps вычисляется при .write — иначе
