@@ -56,7 +56,7 @@ def replace_refs_in_body(lines, ref_map):
 
 def replace_asset_paths(lines, renames):
     """20.10: пути из deps_result.assets_renames (конфликт -> _v2).
-хорош    В ini/lml слеши удвоены, поэтому проверяем оба написания.
+    24.10: В ini/lml слеши удвоены, поэтому проверяем оба написания.
     24.10: sibling-расширения — донорские объекты ссылаются на путь
     с «движковым» расширением (unit Art: 'X.mdl', импортировался
     'X.mdx'): замена 'X.mdx'->'X_v2.mdx' не подменяла поле 'X.mdl',
