@@ -123,12 +123,22 @@ def main():
                     keep.add(tok)
                     queue.append(tok)
 
+    # 23.10: подтяжка _parent (базовые объекты: item:IKK0 -> rlO0 и т.п.).
+    # Ранее родитель не попадал в замыкание deps -> stage_verify падал
+    # на «БИТЫЙ _PARENT», а у приёмника оставался объект без базы.
+    def add_parent(sid, t, body):
+        p = field(body, '_parent')
+        if p and p in tables[t] and p not in keep:
+            keep.add(p)
+            queue.append(p)
+
     while queue:
         sid = queue.pop()
         # определить таблицу
         for t in ['unit', 'ability', 'buff', 'item', 'upgrade']:
             if sid in tables[t]:
                 body = tables[t][sid]
+                add_parent(sid, t, body)
                 if t in ('unit', 'item'):
                     add_ids_from(body, ABIL_KEYS, 'ability')
                 if t == 'ability':
@@ -167,8 +177,10 @@ def main():
     print('ЗАТЯНУЛОСЬ ОБЪЕКТОВ:', len(keep))
     _by = {}
     for _k in keep:
-        _t, _i = _k.split(':', 1) if ':' in _k else ('?', _k)
-        _by.setdefault(_t, []).append(_i)
+        # 23.10: резолв типа по таблицам донора — раньше голые ID
+        # всегда попадали в группу '?'
+        _t = next((t for t in tables if _k in tables[t]), '?')
+        _by.setdefault(_t, []).append(_k)
     for t2 in sorted(_by):
         ids2 = sorted(_by[t2])
         print('  %s (%d): %s%s' % (t2, len(ids2), ', '.join(ids2[:15]), ' ...' if len(ids2) > 15 else ''))
