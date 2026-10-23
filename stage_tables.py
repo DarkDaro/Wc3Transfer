@@ -95,7 +95,15 @@ def prepare_fields(lines, table, mp, ref_map, renames):
             continue
         fields[k] = v
     if '_parent' in fields:
-        fields['_parent'] = mp.get(table + ':' + fields['_parent'], fields['_parent'])
+        # 23.10: значение часто в кавычках ("Udre") — без снятия кавычек
+        # ключ маппинга не находился, и update-ветка возвращала секции
+        # донорского родителя (у перенесённых юнитов пропадали иконки:
+        # наследование шло на перекрытие донора, которого в приёмнике нет)
+        _pv = fields['_parent']
+        _q = _pv.startswith('"')
+        _pk = _pv.strip('"')
+        _pn = mp.get(table + ':' + _pk, _pk)
+        fields['_parent'] = '"%s"' % _pn if _q else _pn
     keys = list(fields)
     pseudo = ['%s = %s' % (k, fields[k]) for k in keys]
     pseudo = replace_refs_in_body(pseudo, ref_map)

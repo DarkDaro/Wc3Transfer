@@ -192,6 +192,40 @@ def main():
 
             lit_sub = (pat_l, _sub)
 
+    # 23.10: hex-литералы донора (0x6E303042) — равкод в числовой форме
+    # (JASS int = 4 байта = равкод). Из донора приходили только в
+    # смоноличенном коде, lit_sub по кавычкам их не затрагивал, и в
+    # приёмник уезжали донорские равкоды (нет объекта) или битые хвосты
+    # старых прогонов. Замена: 0xXXXXXXXX с печатаемым big-endian
+    # равкодом, чья строка есть в lit -> 'NEW' (JASS-литерал 'XXXX' —
+    # тоже integer, семантика и тип не меняются). Не в lit (родные
+    # равкоды приёмника, теги FTtw и пр.) остаются как есть.
+    hex_sub = None
+    if lit:
+        _hex_map = {}
+        for _old, (_new, _ty) in lit.items():
+            if _old and len(_old) == 4:
+                try:
+                    _b = _old.encode('ascii')
+                    if all(0x21 <= c <= 0x7E for c in _b):
+                        _hex_map[b'0x' + _b.hex().upper().encode()] = (_new, _ty)
+                        _hex_map[b'0x' + _b.hex().lower().encode()] = (_new, _ty)
+                except Exception:
+                    pass
+
+        hex_pat = re.compile(rb'(?<![0-9a-zA-Z_.])'
+                             rb'0x(?:' + b'|'.join(re.escape(t) for t in _hex_map) + rb')'
+                             rb'(?![0-9a-fA-F_.])')
+
+        def _hex_sub(m):
+            # 23.10: замена только по точному верхнему/нижнему hex
+            v = _hex_map.get(m.group(0))
+            if not v:
+                return m.group(0)
+            return "'" + v[0] + "'"
+
+        hex_sub = (hex_pat, _hex_sub)
+
     # 18.09 (v5): префикс функций импорта.
     # Собираю имена всех функций донора из переносимых
     # файлов, потом переименовываю объявления и вызовы.
@@ -545,6 +579,9 @@ def main():
             continue
         s = io.open(p, 'rb').read().decode('utf-8', errors='replace')
         s2 = lit_sub[0].sub(lit_sub[1], s) if lit_sub else s
+        # 23.10: hex-равкоды донора (0x6E303042 -> 'n00B' -> маппинг)
+        if hex_sub is not None:
+            s2 = hex_sub[0].sub(hex_sub[1], s2)
         # 18.09 (v5): префикс функций — объявления и вызовы.
         # Только имена функций донора, не нативы/константы.
         # 22.10: один предкомпилированный проход вместо 4 замены
@@ -597,10 +634,34 @@ def main():
 
     # 21.09 фикс D: копирование GUI-пар (.lml+.txt) в папку деплоя,
     # плоско с префиксом папки — как .j файлы. Литералы в .lml живут
-    # без кавычек (Const : A001) — lit_sub их не трогает; если GUI-
-    # триггер ссылает литерал из маппинга, он заменяется на этапе
-    # таблиц (ID в таблицах приёмника уже новые). Префиксация функций
-    # к .lml не применяется: тела GUI генерит редактор.
+    # без кавычек (Const : A001) — lit_sub их не трогал; 23.10: это
+    # была ОШИБКА — GUI-триггер с донорским равкодом (Const : A0EA) в
+    # приёмнике ссылал несуществующий объект (у перенесённых юнитов
+    # способности/иконки в триггерах «пропадали»). Теперь равкоды в
+    # значениях узлов подменяются по маппингу (только точные попадания
+    # в lit; слова/нативки/функции маппинг не содержит — не трогаются).
+    def lml_sub(text):
+        if not lit:
+            return text
+        out = []
+        for l in text.splitlines():
+            mm = re.match(r'^(\s*(?:[A-Za-z_][A-Za-z0-9_]*|Preset)\s*:\s*)(.*)$', l)
+            if mm and not mm.group(2).startswith(("'", '"')):
+                parts = [p.strip() for p in mm.group(2).split(',')]
+                rep = []
+                hit = False
+                for p in parts:
+                    n = lit.get(p)
+                    if n and n[0] != p:
+                        rep.append(n[0])
+                        hit = True
+                    else:
+                        rep.append(p)
+                if hit:
+                    l = mm.group(1) + ', '.join(rep)
+            out.append(l)
+        return chr(10).join(out)
+
     n_gui = 0
     for lml_p, txt_p in gui_pairs:
         # 20.10: раскладка общим правилом _dst_gui (flat/folders)
@@ -611,7 +672,10 @@ def main():
         # ПОСЛЕ копирования .j, но ДО записи каталога и манифеста,
         # и в журнале это выглядело как «триггеры частично перенеслись».
         os.makedirs(os.path.dirname(d), exist_ok=True)
-        io.open(d, 'wb').write(io.open(lml_p, 'rb').read())
+        # 23.10: подмена донорских равкодов в теле GUI-триггера
+        body = io.open(lml_p, 'rb').read().decode('utf-8', errors='replace')
+        body = lml_sub(body)
+        io.open(d, 'wb').write(body.encode('utf-8'))
         written.append(os.path.relpath(d, tgt).replace(os.sep, '/'))
         n_gui += 1
         if txt_p:
@@ -649,6 +713,9 @@ def main():
     if os.path.exists(header_src) and not dry:
         hs = io.open(header_src, 'rb').read().decode('utf-8', errors='replace')
         hs2 = lit_sub[0].sub(lit_sub[1], hs) if lit_sub else hs
+        # 23.10: hex-равкоды и в шапке
+        if hex_sub is not None:
+            hs2 = hex_sub[0].sub(hex_sub[1], hs2)
         # 18.09 (v5-fix): префикс функций и в шапке тоже
         # 22.10: тот же один предкомпилированный проход
         if prefix_sub is not None:
