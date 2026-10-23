@@ -134,7 +134,10 @@ def prepare_fields(lines, table, mp, ref_map, renames):
 
 def apply_std_fields(text, sid, fields):
     """20.10: вписать поля в существующую секцию [sid] (режим replace_std).
-    Возвращает (новый текст, сколько полей применено)."""
+    Возвращает (новый текст, сколько полей применено, менялось ли).
+    24.10 (О1): поле переписывается ТОЛЬКО если значение реально
+    отличается — повторные update-прогоны не переписывают файл заново
+    (идемпотентность: md5 приёмника сохраняется, когда донор не менялся)."""
     lines = text.split('\n')
     start = None
     end = len(lines)
@@ -148,27 +151,32 @@ def apply_std_fields(text, sid, fields):
         if m.group(1) == sid:
             start = i
     if start is None:
-        return text, 0
+        return text, 0, False
     applied = set()
+    changed = False
     in_block = False
     for i in range(start + 1, end):
         l = lines[i]
         if not in_block:
             mm = re.match(r'^([A-Za-z_][A-Za-z0-9_]*)\s*=', l)
             if mm and mm.group(1) in fields:
-                lines[i] = '%s = %s' % (mm.group(1), fields[mm.group(1)])
+                new_line = '%s = %s' % (mm.group(1), fields[mm.group(1)])
                 applied.add(mm.group(1))
+                if lines[i] != new_line:
+                    lines[i] = new_line
+                    changed = True
         if not in_block and l.rstrip().endswith('[=['):
             in_block = True
         elif in_block and ']=]' in l:
             in_block = False
     missing = [k for k in fields if k not in applied]
     if missing:
+        changed = True
         pos = end
         while pos > start + 1 and lines[pos - 1].strip() == '':
             pos -= 1
         lines[pos:pos] = ['%s = %s' % (k, fields[k]) for k in missing]
-    return '\n'.join(lines), len(applied) + len(missing)
+    return '\n'.join(lines), len(applied) + len(missing), changed
 
 def main():
     cfgp = sys.argv[1]
@@ -219,6 +227,37 @@ def main():
     updated_secs = 0
     updated_fields = 0
     errors = 0
+    # 24.10 (О2/О3): ключ идемпотентности update-ветки. Обновление
+    # переписывает ~25 тыс. полей (~6 мин). Если донор-таблицы, маппинг
+    # и renames не изменились с прошлого успешного update — повторять
+    # бессмысленно: тот же донор даёт те же поля (а О1 пишет только
+    # реально отличающиеся). Ключ хранится рядом с конфигом; при смене
+    # пары карт (source/target) ключ сбрасывается сам.
+    # Пропуск не влияет на перенос НОВЫХ секций (that's to_move).
+    import hashlib
+    _key_parts = []
+    for t in cfg['tables']:
+        fp = os.path.join(src, 'table', t + '.ini')
+        _key_parts.append('%s:%s' % (t, hashlib.md5(io.open(fp, 'rb').read()).hexdigest()
+                                     if os.path.exists(fp) else 'none'))
+    _key_parts.append('mp:%s' % (hashlib.md5(io.open(mp_json, 'rb').read()).hexdigest()
+                                 if os.path.exists(mp_json) else 'none'))
+    _key_parts.append('renames:' + json.dumps(renames, sort_keys=True, ensure_ascii=False))
+    # 24.10: приёмник в ключе — смена target сбрасывает пропуски
+    _key_parts.append('tgt:' + tgt)
+    _upd_key = hashlib.md5('|'.join(_key_parts).encode('utf-8')).hexdigest()
+    _key_p = os.path.join(here, 'tables_upd_key.json')
+    _prev_key = None
+    if os.path.exists(_key_p):
+        try:
+            _prev_key = json.load(io.open(_key_p, 'rb')).get('key')
+        except Exception:
+            _prev_key = None
+    update_skip = (cfg.get('tables_update_existing')
+                   and _prev_key == _upd_key)
+    if cfg.get('tables_update_existing') and update_skip:
+        print('обновление существующих секций: ПРОПУСК (донор/маппинг/renames '
+              'не менялись с прошлого update, ключ tables_upd_key.json)')
     for t in cfg['tables']:
         sp = os.path.join(src, 'table', t + '.ini')
         tp = os.path.join(tgt, 'table', t + '.ini')
@@ -264,7 +303,10 @@ def main():
         # просто пропускались, и правки донора не доезжали. Опция
         # tables_update_existing переносит простые поля поверх приёмника,
         # не трогая блочные [=[ ... ]=] и отсутствующие в доноре поля.
-        if cfg.get('tables_update_existing'):
+        # 24.10 (О3): при неизменившихся доноре/маппинге/renames
+        # повторный update пропускается (ключ tables_upd_key.json) —
+        # ~6 минут регулярного цикла не тратятся зря.
+        if cfg.get('tables_update_existing') and not update_skip:
             upd_text = io.open(tp, 'rb').read().decode('utf-8', errors='replace')
             n_sec = n_fld = 0
             for old in order:
@@ -277,7 +319,7 @@ def main():
                 fields = prepare_fields(secs[old], t, mp, ref_map, renames)
                 if not fields:
                     continue
-                upd_text, nf = apply_std_fields(upd_text, new, fields)
+                upd_text, nf, _ch = apply_std_fields(upd_text, new, fields)
                 if nf:
                     n_sec += 1
                     n_fld += nf
@@ -307,7 +349,7 @@ def main():
                 f2 = {}
                 for k, l in zip(keys, vals):
                     f2[k] = l.split('=', 1)[1].strip()
-                text, nf = apply_std_fields(text, sid, f2)
+                text, nf = apply_std_fields(text, sid, f2)[:2]
                 if nf:
                     n_std += nf
                 else:
@@ -327,6 +369,12 @@ def main():
     print('ИТОГО секций:', total, '| replace_std полей:', applied_std,
           '| обновлено секций:', updated_secs, 'полей:', updated_fields,
           ('(dry-run)' if dry else ''))
+    # 24.10 (О3): ключ сохраняется только при успешном боевом update —
+    # следующий прогон с неизменным донором пропустит обновление
+    if (cfg.get('tables_update_existing') and not update_skip
+            and not dry and not errors):
+        io.open(_key_p, 'wb').write(json.dumps({'key': _upd_key}, indent=1).encode('utf-8'))
+        print('ключ обновления сохранён (tables_upd_key.json)')
     if errors:
         sys.exit(1)
 

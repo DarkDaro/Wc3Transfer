@@ -228,6 +228,44 @@ def main():
 
         hex_sub = (_hex_pat, _hex_sub)
 
+    # 24.10 (A7): пути конфликтных ассетов донора в деплой-коде. .j
+    # ссылаются на них в строках ('X.mdx', 'ReplaceableTextures\\...'),
+    # lit_sub/hex_sub их не касались, и перенесённый триггер грузил
+    # РОДНОЙ ассет приёмника (контент другой). Заменяем по deps_result
+    # assets_renames + sibling-расширения (mdl/mdx, blp/tga); в джасс-
+    # строках слэши удвоены — покрываем обе формы, замена возвращает
+    # удвоенные тоже. Файл не существует у донора — не заменяем.
+    path_sub = None
+    deps_p2 = os.path.join(here, 'deps_result.json')
+    if os.path.exists(deps_p2):
+        try:
+            _ren = json.load(io.open(deps_p2, 'rb')).get('assets_renames') or {}
+        except Exception:
+            _ren = {}
+        _SIB = {'mdx': ('mdl', 'mdx'), 'mdl': ('mdl', 'mdx'),
+                'blp': ('blp', 'tga'), 'tga': ('blp', 'tga')}
+        _rpairs = []
+        for _old, _new in sorted(_ren.items(), key=lambda kv: -len(kv[0])):
+            _ob, _oe = os.path.splitext(_old)
+            _nb, _ne = os.path.splitext(_new)
+            _forms = [(_old, _new)]
+            if _oe.lstrip('.').lower() in _SIB:
+                for _sib in _SIB[_oe.lstrip('.').lower()]:
+                    if _sib == _oe.lstrip('.').lower():
+                        continue
+                    _forms.append((_ob + '.' + _sib, _nb + '.' + _ne))
+            for _o, _n in _forms:
+                for _o2 in (_o, _o.replace('\\', '\\\\')):
+                    _rpairs.append((_o2, _n.replace('\\', '\\\\')))
+        if _rpairs:
+            def path_sub_text(text):
+                for _o, _n in _rpairs:
+                    if _o in text:
+                        text = text.replace(_o, _n)
+                return text
+            path_sub = path_sub_text
+            print('путей конфликт-замены для кода: %d' % len(_rpairs))
+
     # 24.10: конфликтные переменные донора (имя совпадает с приёмником,
     # но тип/размер другой, напр. AModInteger integer array(20) vs
     # integervar array(1)): в перенесённых lml/.j имя заменяется на
@@ -613,6 +651,9 @@ def main():
         # 24.10: конфликтные udg_-переменные донора -> <deploy_to>_<имя>
         if var_pat is not None:
             s2 = var_pat[0].sub(var_pat[1], s2)
+        # 24.10 (A7): renames-пути (эффекты/иконки/звуки в строках .j)
+        if path_sub is not None:
+            s2 = path_sub(s2)
         # 18.09 (v5): префикс функций — объявления и вызовы.
         # Только имена функций донора, не нативы/константы.
         # 22.10: один предкомпилированный проход вместо 4 замены
@@ -754,6 +795,9 @@ def main():
         # 23.10: hex-равкоды и в шапке
         if hex_sub is not None:
             hs2 = hex_sub[0].sub(hex_sub[1], hs2)
+        # 24.10 (A7): renames-пути и в шапке
+        if path_sub is not None:
+            hs2 = path_sub(hs2)
         # 18.09 (v5-fix): префикс функций и в шапке тоже
         # 22.10: тот же один предкомпилированный проход
         if prefix_sub is not None:
