@@ -1,0 +1,178 @@
+{
+  "_comment": "Конфиг переноса объектов между lni-картами. Заполнить под пару карт, затем: python transfer_run.py --plan",
+  "source": "C:/AgentLetta/BVO3.2",
+  "target": "C:/AgentLetta/BVOLKEK",
+  "name": "LOWSBVO",
+  "tables": [
+    "unit",
+    "ability",
+    "buff",
+    "item",
+    "upgrade"
+  ],
+  "skip_tables": [
+    "w3i",
+    "misc"
+  ],
+  "import": {
+    "enabled": true,
+    "copy_dirs": [
+      "resource",
+      "sound"
+    ],
+    "exclude_paths": [
+      "war3mapskin.txt",
+      "war3mapExtra.txt",
+      "war3mapMap.blp",
+      "war3mapMap.tga",
+      "war3mapMap.b00",
+      "minimap",
+      "LoadingScreen",
+      "loadingscreen",
+      "loadbar",
+      "console",
+      "war3mapMisc.txt",
+      "war3mapShadow",
+      "war3mapPreview",
+      "UI/Console",
+      "UI/"
+    ],
+    "check_missing_refs": true,
+    "allow_override": false
+  },
+  "ui": {
+    "enabled": false,
+    "_comment": "true ТОЛЬКО для полного переноса карты-источника как отдельного проекта",
+    "mode": "transfer"
+  },
+  "code": {
+    "enabled": true,
+    "folders": "folders",
+    "trigger_dirs": [],
+    "shift_coords": {
+      "enabled": false,
+      "dx": 0.0,
+      "dy": 0.0,
+      "ufs_range": 4000.0
+    },
+    "deploy_to": "BVO",
+    "include_monolith": true,
+    "allow_b": true,
+    "only_dirs": [],
+    "header_mode": "append",
+    "func_prefix": "BVO",
+    "update_catalog": true,
+    "null_broken_gguits": true
+  },
+  "geometry": {
+    "enabled": false,
+    "offset": [
+      11392.0,
+      -2080.0
+    ],
+    "recount_z": true
+  },
+  "testspawn": {
+    "enabled": true,
+    "heroes": [
+      "Hgam",
+      "Hpal"
+    ],
+    "items": true,
+    "rect": "0,0"
+  },
+  "mapping": {
+    "pkl": "transfer_mapping.pkl",
+    "registry": "target_id_registry.json",
+    "case_conflict_check": true,
+    "duplicate_name_check": true,
+    "mode": "smart",
+    "prebuilt_dir": "G:\\w3x2lni_enUS_v2.7.2\\data\\ruRU-1.26.0\\prebuilt\\Custom"
+  },
+  "profile": "custom",
+  "_profiles_comment": {
+    "heroes": "герои+способности+баффы+иконки (без геометрии)",
+    "full": "полная карта (включая UI и геометрию)",
+    "items": "только предметы",
+    "custom": "как в этом конфиге"
+  },
+  "safety": {
+    "backup_dir": "transfer_backup",
+    "state_file": "transfer_state.json",
+    "dry_run_first": true,
+    "stop_on_error": true,
+    "stage_timeout_min": 60.0
+  },
+  "deps": {
+    "roots": [],
+    "_comment": "ID источника: герои/предметы/способности, от которых строится граф"
+  },
+  "code_cut": {
+    "enabled": false,
+    "entries": [],
+    "output": "cut_heroes.j",
+    "auto_expand": true
+  },
+  "stage_enabled": {
+    "mapping": true,
+    "registry": true,
+    "deps": true,
+    "tables": true,
+    "import": true,
+    "code": true,
+    "code_cut": false,
+    "geometry": false,
+    "testspawn": false,
+    "verify": true,
+    "globals": true
+  },
+  "gui": {
+    "sound_on_done": true,
+    "autolog": true,
+    "log_font": 9,
+    "geometry": "1851x990+26+26",
+    "theme": "dark",
+    "path_history": {
+      "j": [
+        "",
+        ""
+      ],
+      "map": [
+        "C:/AgentLetta/BVOLKEK"
+      ]
+    },
+    "sounds": true,
+    "toast": true
+  },
+  "cleanup": {
+    "last_dir": "C:/AgentLetta/LOWSTOBVO",
+    "exclude_dirs": [],
+    "suffix_patterns": [
+      "(убрано)",
+      "(Убрано)",
+      "не используется"
+    ],
+    "protect": true
+  },
+  "trigclean": {
+    "empty_dirs": true,
+    "del_empty_txt": true,
+    "disabled": true,
+    "closed": false,
+    "del_notes": true,
+    "globals": true,
+    "dead_funcs": false,
+    "cascade": true,
+    "include_codej": false,
+    "comments": true
+  },
+  "rawconv": {
+    "last_path": "",
+    "last_mode": "both"
+  },
+  "deob": {
+    "last_path": ""
+  },
+  "tables_update_existing": false,
+  "repair": {}
+}
